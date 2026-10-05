@@ -4,12 +4,12 @@ import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 
 def now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def new_id(prefix: str) -> str:
@@ -126,9 +126,10 @@ class Repository:
                 raise KeyError(run_id)
             existing = json.loads(row["data"])
             # A late worker response cannot revive a cancelled run.
-            if existing["status"] == "cancelled" and fields.get("status") not in (None, "cancelled"):
-                fields.pop("status", None)
-                fields.pop("stage", None)
+            if existing["status"] == "cancelled":
+                fields["status"] = "cancelled"
+                fields["stage"] = "cancelled"
+                fields.pop("results", None)
             data = {**existing, **fields, "updated_at": now()}
             con.execute("UPDATE runs SET status=?, data=? WHERE id=?",
                         (data["status"], json.dumps(data), run_id))
@@ -150,10 +151,19 @@ class Repository:
         return self.get_run(run_id)["status"] == "cancelled"
 
     def cancel_run(self, run_id: str) -> dict:
-        current = self.get_run(run_id)
-        if current["status"] in ("completed", "partial", "failed", "cancelled"):
-            return current
-        return self.update_run(run_id, status="cancelled", stage="cancelled", stop_reason="user_cancelled")
+        with self.connection() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT data FROM runs WHERE id=?", (run_id,)).fetchone()
+            if not row:
+                raise KeyError(run_id)
+            data = json.loads(row["data"])
+            if data["status"] in ("completed", "partial", "failed", "cancelled"):
+                return data
+            data.update(status="cancelled", stage="cancelled", stop_reason="user_cancelled",
+                        updated_at=now())
+            con.execute("UPDATE runs SET status='cancelled',data=? WHERE id=?",
+                        (json.dumps(data), run_id))
+        return data
 
     def upsert_task(self, run_id: str, task_id: str, stage: str,
                     status: str = "pending", **fields) -> dict:
@@ -198,4 +208,3 @@ class Repository:
         with self.connection() as con:
             row = con.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         return row["value"] if row else None
-

@@ -31,6 +31,7 @@ class RunConfig(BaseModel):
     scan_fps: float | None = Field(default=None, gt=0, le=30)
     refine_fps: float = Field(default=12, gt=0, le=60)
     max_input_frames: int = Field(default=160, ge=16, le=512)
+    max_frame_width: int = Field(default=768, ge=256, le=1920)
     max_calls: int = Field(default=500, ge=1, le=5000)
     max_output_tokens: int = Field(default=8192, ge=512, le=32768)
     request_timeout_s: int = Field(default=120, ge=10, le=600)
@@ -154,4 +155,3 @@ class EventResult(BaseModel):
     duplicate_of: str | None = None
     clip: ClipResult | None = None
     clip_status: Literal["pending", "succeeded", "failed", "not_required"] = "pending"
-
