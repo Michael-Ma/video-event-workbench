@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 import uuid
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,7 @@ from .algorithms import (
     select_occurrences,
     split_window,
 )
+from .billing import estimate_call_cost, pricing_snapshot
 from .config import Settings
 from .contracts import (
     Candidate,
@@ -141,6 +144,20 @@ class Journal:
                 raise IncompleteResponse("Response did not enumerate the full input")
         return parsed
 
+    def log_call_cost(self, stage: str, operation: str, task_id: str, attempt_id: str,
+                      cost: dict, *, usage: dict | None = None, metrics: dict | None = None,
+                      artifact_path: Path):
+        if cost["status"] == "estimated":
+            message = f"Gemini {operation}: 估算费用 ${cost['estimated_usd']:.6f} USD（付费标准价）"
+        elif cost["status"] == "not_billable":
+            message = f"Fixture {operation}: 本地调用，费用 $0 USD"
+        else:
+            message = f"Gemini {operation}: 费用未知，未计为 $0（{cost['reason']}）"
+        self.log(stage, "model_call_cost", message, task_id=task_id, attempt_id=attempt_id,
+                 operation=operation, model_id=self.config.model_id, cost=cost,
+                 usage=usage or {}, request_metrics=metrics or {},
+                 artifact_refs=[self.relative(artifact_path)])
+
     def call(self, task_id: str, stage: str, operation: str, request: dict, **fields):
         self.check_cancelled()
         existing = next((t for t in self.repo.list_tasks(self.run_id)
@@ -166,6 +183,9 @@ class Journal:
                                   error_code="call_budget", **fields)
             raise CallBudgetExceeded("Maximum model request count reached")
         attempt_id = uuid.uuid4().hex
+        submitted_at = now()
+        pricing = pricing_snapshot(self.config.provider, self.config.model_id,
+                                   date.fromisoformat(submitted_at[:10]))
         attempt_folder = self.folder / stage / task_id / attempt_id
         request_path, response_path = attempt_folder / "request.json", attempt_folder / "response.json"
         debug_request = dict(request)
@@ -174,44 +194,61 @@ class Journal:
         _write_json(request_path, {
             "operation": operation, "prompt_version": PROMPT_VERSION,
             "model_id": self.config.model_id, "provider": self.config.provider,
-            "request": debug_request,
+            "request": debug_request, "pricing": pricing,
         })
         # SQLite commits with synchronous=FULL before the network boundary.
         self.repo.upsert_task(
             self.run_id, task_id, stage, "submitting", attempt_id=attempt_id,
-            request_intent={"operation": operation, "created_at": now(),
-                            "model_id": self.config.model_id},
+            request_intent={"operation": operation, "created_at": submitted_at,
+                            "model_id": self.config.model_id, "pricing": pricing},
             request_path=self.relative(request_path), **fields,
         )
         self.log(stage, "request_submitting", "Persisted request intent before model submission",
                  task_id=task_id, attempt_id=attempt_id,
                  artifact_refs=[self.relative(request_path)])
+        started = time.monotonic()
         try:
             reply = self.provider.analyze(operation, request)
         except ProviderError as exc:
             status = "request_unknown" if exc.request_unknown else "failed"
+            cost = estimate_call_cost(pricing, {}, outcome_unknown=exc.request_unknown)
             error_path = attempt_folder / "error.json"
             _write_json(error_path, {"code": exc.code, "message": str(exc), "details": exc.details,
-                                     "request_unknown": exc.request_unknown})
+                                     "request_unknown": exc.request_unknown, "cost": cost})
             self.repo.upsert_task(self.run_id, task_id, stage, status,
                                   error_code=exc.code, error=str(exc), error_details=exc.details,
-                                  error_path=self.relative(error_path))
+                                  error_path=self.relative(error_path), cost=cost)
+            self.log_call_cost(stage, operation, task_id, attempt_id, cost,
+                               metrics=exc.details, artifact_path=error_path)
             self.log(stage, exc.code, str(exc), level="error", task_id=task_id,
                      error_details=exc.details, artifact_refs=[self.relative(error_path)])
             raise
         except Exception as exc:
             # Unknown adapters may have crossed the network boundary. Conservatively stop.
+            cost = estimate_call_cost(pricing, {}, outcome_unknown=True)
+            error_path = attempt_folder / "error.json"
+            _write_json(error_path, {"code": "adapter_unknown", "request_unknown": True, "cost": cost})
             self.repo.upsert_task(self.run_id, task_id, stage, "request_unknown",
-                                  error_code="adapter_unknown")
+                                  error_code="adapter_unknown", cost=cost,
+                                  error_path=self.relative(error_path))
+            self.log_call_cost(stage, operation, task_id, attempt_id, cost,
+                               artifact_path=error_path)
             raise ProviderError("request_unknown", "Unexpected adapter failure; request outcome "
                                 "is unknown", request_unknown=True) from exc
+        reply.cost = estimate_call_cost(pricing, reply.usage)
         _write_json(response_path, {
             "payload": reply.payload, "raw": reply.raw, "usage": reply.usage,
-            "finish_reason": reply.finish_reason, "error": reply.error,
+            "finish_reason": reply.finish_reason, "error": reply.error, "cost": reply.cost,
         })
         current = next(t for t in self.repo.list_tasks(self.run_id) if t["task_id"] == task_id)
         if current.get("attempt_id") != attempt_id:
             raise ProviderError("stale_attempt", "A newer attempt owns this task")
+        self.repo.upsert_task(self.run_id, task_id, stage, current["status"], cost=reply.cost)
+        self.log_call_cost(stage, operation, task_id, attempt_id, reply.cost, usage=reply.usage,
+                           metrics=reply.raw.get("request_metrics", {
+                               "elapsed_s": round(time.monotonic() - started, 3),
+                               "latency_scope": "provider_adapter",
+                           }), artifact_path=response_path)
         # Keep late responses as artifacts but do not publish them into cancelled work.
         if self.cancelled():
             self.repo.upsert_task(self.run_id, task_id, stage, "cancelled",

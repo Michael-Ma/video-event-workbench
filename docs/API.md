@@ -35,6 +35,15 @@ action, source range, safe details and artifact refs, plus stopped_stage and ava
 event/clip counts. Older journals are interpreted at read time without mutation.
 Task errors can expose `error_details` and `error_path`.
 
+Model tasks also expose `cost`: status (`estimated`, `unknown`, `not_billable`),
+`estimated_usd` (null when unknown), currency/basis, pricing version/source/effective rates,
+and token counts with input/cached-input/output components. The `model_call_cost` log
+entry includes the operation, task/attempt IDs, cost, original usage, and request metrics.
+The same cost record is saved in each response/error artifact. A pricing snapshot is saved
+before submission. Estimates use paid Standard list rates, including output thinking tokens;
+they do not assert the account's actual billed amount. Cancelled or invalid responses still
+retain available usage/cost; persisted-response reuse does not duplicate a cost log.
+
 Results may be available while running. `provisional:true` marks saved intermediate
 events awaiting global reconciliation; their matched bucket is exposed as uncertain.
 After reconciliation, available clips are published incrementally. Cancelled or failed

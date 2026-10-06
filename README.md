@@ -62,6 +62,14 @@ Point and interval locations use original-video microseconds. An uncertain clip 
 explicitly a context fallback; rejected events and duplicates do not produce formal clips.
 The raw query remains authoritative, and first/last selection is applied globally.
 
+Each model call records `model_call_cost` in the processing/debug log, with token usage,
+elapsed request time, input frame count/bytes, and an estimated USD cost. Estimates use a
+versioned Gemini paid Standard price snapshot, including thinking tokens and discounted
+cached input. The current price table covers `gemini-3.8-flash`; other models, missing usage,
+and unknown request outcomes report unknown cost rather than zero. These are list-price
+estimates, not billing receipts; free-tier use or account discounts can differ. Fixture calls
+are explicitly local and cost zero. Reusing a saved response does not log another paid call.
+
 State and artifacts are local in `.data/`: SQLite journal, immutable original-frame
 indexes, navigation previews, sampled JPEGs, model request/response records, results,
 and exported clips. `.env`, videos and runtime data are excluded from Git.

@@ -92,3 +92,18 @@ file-input overflow was corrected and the document width became 375 pixels.
 No historical unknown request was resubmitted and no new paid model generation was made
 by this verification. Physical OS file dragging was covered through DOM drag-event tests;
 the browser exercised the shared upload path through its native file chooser.
+# Gemini per-call cost logging 2026-10-05
+
+Added versioned paid Standard list-price estimates for `gemini-3.8-flash`, including
+cached input discounts and thinking/output tokens. Every submitted call saves pricing
+before the remote boundary and logs cost/usage/latency with task and attempt identity.
+Unknown request outcomes, missing usage, unsupported pricing, and unsupported tool
+usage remain unknown rather than zero. Received replies retain cost even when truncated,
+invalid, or cancelled; saved-response reuse does not duplicate a cost log.
+
+Validation: 84 backend tests passed (82 in the sandbox; the two localhost startup checks
+passed with localhost permissions), and Ruff passed. Added 16 cases covering accounting,
+effective dates, unknown usage, persistence, cancellation, truncation, and response reuse.
+No live paid Gemini calls were made. Fee estimates are not verified account billing receipts.
+
+Live local fixture verification: a completed run exposed five per-call zero-cost logs and task cost fields through the API. No remote Gemini request was submitted.

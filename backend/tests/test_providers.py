@@ -61,6 +61,9 @@ def test_gemini_sdk_call_is_explicit_frames_schema_and_no_implicit_retry(monkeyp
     assert parts[2].inline_data.data == frame.read_bytes()
     assert "test-secret" not in json.dumps(reply.raw)
     assert seen["closed"]
+    assert reply.raw["request_metrics"]["frame_count"] == 1
+    assert reply.raw["request_metrics"]["input_bytes"] == len(frame.read_bytes())
+    assert reply.raw["request_metrics"]["elapsed_s"] >= 0
 
 
 def test_transport_failure_is_unknown_and_not_retried(monkeypatch, tmp_path):

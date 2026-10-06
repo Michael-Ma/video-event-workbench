@@ -32,6 +32,7 @@ class ProviderReply:
     usage: dict = field(default_factory=dict)
     finish_reason: str = "STOP"
     error: str | None = None
+    cost: dict = field(default_factory=dict)
 
 
 QUERY_PROMPT = """Parse the user's original query into a minimal event-location specification.
@@ -162,6 +163,7 @@ class GeminiProvider:
                     temperature=0,
                 ),
             )
+            elapsed_s = round(time.monotonic() - started, 3)
         except errors.APIError as exc:
             raise ProviderError("provider_http_error",
                                 f"Model provider returned HTTP {exc.code}",
@@ -198,7 +200,9 @@ class GeminiProvider:
                  if response.usage_metadata else {})
         raw = {"text": text, "finish_reason": finish, "usage": usage,
                "model_version": getattr(response, "model_version", None),
-               "response_id": getattr(response, "response_id", None)}
+               "response_id": getattr(response, "response_id", None),
+               "request_metrics": {**request_details, "elapsed_s": elapsed_s,
+                                   "latency_scope": "generate_content"}}
         try:
             payload = json.loads(text)
             if not isinstance(payload, dict):

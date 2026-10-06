@@ -7,7 +7,7 @@ from app.config import Settings
 from app.contracts import Candidate, Location, ModelResponse, QuerySpec, RunConfig
 from app.db import Repository
 from app.media import generate_demo
-from app.pipeline import Journal, refinement_results
+from app.pipeline import Cancelled, IncompleteResponse, Journal, refinement_results
 from app.providers import ProviderError, ProviderReply
 from app.worker import recover_interrupted_runs
 
@@ -35,6 +35,63 @@ def candidates():
     return [Candidate(candidate_id=f"c{i}", window_id="w", entity_key="arm",
                       location=Location(kind="interval", start_us=i * 1_000_000,
                                         end_us=(i + 1) * 1_000_000)) for i in (1, 2)]
+
+
+@pytest.mark.parametrize("finish,cancel", [("STOP", False), ("MAX_TOKENS", False), ("STOP", True)])
+def test_call_cost_persists_even_for_truncated_or_cancelled_replies(store, finish, cancel):
+    settings, repo = store
+    config = RunConfig(provider="gemini")
+    run = create_run(repo, config=config)
+    calls = []
+
+    class Provider:
+        def analyze(self, operation, request):
+            calls.append(operation)
+            if cancel:
+                repo.cancel_run(run["id"])
+            return ProviderReply({"raw_query": "find events"}, {"response_id": "test-response"},
+                                 {"prompt_token_count": 10_000, "candidates_token_count": 1_000,
+                                  "thoughts_token_count": 500}, finish)
+
+    journal = Journal(run, repo, settings, config, Provider())
+    if finish != "STOP" or cancel:
+        with pytest.raises(Cancelled if cancel else IncompleteResponse):
+            journal.call("query", "query", "normalize_query", {"raw_query": "find events"})
+    else:
+        journal.call("query", "query", "normalize_query", {"raw_query": "find events"})
+        journal.call("query", "query", "normalize_query", {"raw_query": "find events"})
+    task = repo.list_tasks(run["id"])[0]
+    assert task["cost"]["estimated_usd"] == pytest.approx(0.013125)
+    response = json.loads((settings.data_dir / task["response_path"]).read_text())
+    assert response["cost"] == task["cost"]
+    intent = json.loads((settings.data_dir / task["request_path"]).read_text())
+    assert response["cost"]["pricing_version"] == intent["pricing"]["pricing_version"]
+    costs = [entry for entry in repo.get_logs(run["id"]) if entry["code"] == "model_call_cost"]
+    assert len(costs) == len(calls) == 1
+    assert costs[0]["details"]["cost"] == task["cost"]
+
+
+def test_unknown_request_cost_is_saved_without_retry_or_zero_charge(store):
+    settings, repo = store
+    config = RunConfig(provider="gemini")
+    run = create_run(repo, config=config)
+    calls = []
+
+    class Provider:
+        def analyze(self, operation, request):
+            calls.append(operation)
+            raise ProviderError("request_timeout", "request outcome unknown", request_unknown=True)
+
+    journal = Journal(run, repo, settings, config, Provider())
+    for _ in range(2):
+        with pytest.raises(ProviderError):
+            journal.call("query", "query", "normalize_query", {"raw_query": "find events"})
+    task = repo.list_tasks(run["id"])[0]
+    assert task["cost"]["estimated_usd"] is None
+    assert task["cost"]["reason"] == "request_outcome_unknown"
+    assert json.loads((settings.data_dir / task["error_path"]).read_text())["cost"] == task["cost"]
+    assert len(calls) == 1
+    assert len([entry for entry in repo.get_logs(run["id"]) if entry["code"] == "model_call_cost"]) == 1
 
 
 def test_empty_refine_response_does_not_reject_unmentioned_candidates():
