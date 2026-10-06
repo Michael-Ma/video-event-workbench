@@ -72,7 +72,7 @@ def test_transport_failure_is_unknown_and_not_retried(monkeypatch, tmp_path):
 
         def generate_content(self, **_):
             calls.append(1)
-            raise TimeoutError("request may have arrived")
+            raise TimeoutError("request URL may contain test-secret")
 
         def close(self):
             pass
@@ -83,3 +83,26 @@ def test_transport_failure_is_unknown_and_not_retried(monkeypatch, tmp_path):
         provider.analyze("normalize_query", {"raw_query": "find something"})
     assert caught.value.request_unknown is True
     assert len(calls) == 1
+
+
+def test_timeout_diagnostics_are_precise_without_exposing_sdk_exception_text(monkeypatch, tmp_path):
+    class Client:
+        def __init__(self, **_):
+            self.models = self
+        def generate_content(self, **_):
+            raise TimeoutError("https://private.invalid/?key=test-secret")
+        def close(self):
+            pass
+    monkeypatch.setattr(genai, "Client", Client)
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"jpeg")
+    provider = GeminiProvider(Settings(data_dir=tmp_path, gemini_api_key="test-secret"), RunConfig())
+    with pytest.raises(ProviderError) as caught:
+        provider.analyze("propose", {"frames": [{"frame_id": "frame1", "local_time_s": 0, "path": str(frame)}]})
+    error = caught.value
+    assert error.code == "request_timeout" and error.request_unknown
+    assert error.details["exception_type"] == "TimeoutError"
+    assert error.details["timeout_s"] == 120
+    assert error.details["frame_count"] == 1 and error.details["input_bytes"] == 4
+    assert "test-secret" not in json.dumps(error.details) + str(error)
+    assert "private.invalid" not in json.dumps(error.details) + str(error)

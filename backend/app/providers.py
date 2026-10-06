@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from .config import Settings
 from .contracts import ModelResponse, QuerySpec, RunConfig
@@ -14,10 +17,12 @@ PROMPT_VERSION = "event-localization-v1"
 
 
 class ProviderError(RuntimeError):
-    def __init__(self, code: str, message: str, *, request_unknown: bool = False):
+    def __init__(self, code: str, message: str, *, request_unknown: bool = False,
+                 details: dict | None = None):
         super().__init__(message)
         self.code = code
         self.request_unknown = request_unknown
+        self.details = details or {}
 
 
 @dataclass
@@ -122,13 +127,15 @@ class GeminiProvider:
                 "location": c["local_location"], "reason": c.get("reason", ""),
             } for c in request["candidates"]]
         parts = [types.Part.from_text(text=json.dumps(public_request, ensure_ascii=False))]
+        input_bytes = 0
         try:
             for frame in request.get("frames", []):
                 parts.append(types.Part.from_text(text=json.dumps({
                     "frame_id": frame["frame_id"], "local_time_s": frame["local_time_s"],
                 })))
-                parts.append(types.Part.from_bytes(
-                    data=Path(frame["path"]).read_bytes(), mime_type="image/jpeg"))
+                data = Path(frame["path"]).read_bytes()
+                input_bytes += len(data)
+                parts.append(types.Part.from_bytes(data=data, mime_type="image/jpeg"))
         except (OSError, KeyError) as exc:
             raise ProviderError("input_unavailable", "A sampled input frame is unavailable") from exc
         if len(request.get("frames", [])) > self.config.max_input_frames:
@@ -140,6 +147,10 @@ class GeminiProvider:
                 retry_options=types.HttpRetryOptions(attempts=1),
             ),
         )
+        started = time.monotonic()
+        request_details = {"timeout_s": self.config.request_timeout_s,
+                           "frame_count": len(request.get("frames", [])),
+                           "input_bytes": input_bytes, "operation": operation}
         try:
             response = client.models.generate_content(
                 model=self.config.model_id,
@@ -152,13 +163,26 @@ class GeminiProvider:
                 ),
             )
         except errors.APIError as exc:
-            # A returned API error is a known outcome. Do not log SDK URLs/headers.
             raise ProviderError("provider_http_error",
-                                f"Model provider returned HTTP {exc.code}") from exc
+                                f"Model provider returned HTTP {exc.code}",
+                                details={**request_details, "http_status": exc.code,
+                                         "elapsed_s": round(time.monotonic() - started, 2)}) from exc
         except Exception as exc:
-            # Includes transport timeout/read/reset: the server may already have billed it.
-            raise ProviderError("request_unknown", "Model request outcome is unknown; "
-                                "it was not automatically retried", request_unknown=True) from exc
+            chain, cursor, timed_out = [], exc, False
+            for _ in range(6):
+                if cursor is None:
+                    break
+                chain.append(type(cursor).__name__)
+                timed_out |= isinstance(cursor, (TimeoutError, httpx.TimeoutException))
+                cursor = cursor.__cause__ or cursor.__context__
+            # Only exception types are retained: SDK exception strings may contain URLs/keys.
+            details = {**request_details, "exception_type": type(exc).__name__,
+                       "exception_chain": chain, "elapsed_s": round(time.monotonic() - started, 2)}
+            raise ProviderError(
+                "request_timeout" if timed_out else "request_unknown",
+                f"Model request timed out after {self.config.request_timeout_s}s; outcome is unknown"
+                if timed_out else "Model request outcome is unknown; it was not automatically retried",
+                request_unknown=True, details=details) from exc
         finally:
             try:
                 client.close()

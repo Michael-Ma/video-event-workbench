@@ -62,3 +62,33 @@ output, optional/required key behavior, invalid configuration, occupied ports an
 requiring both worker and frontend readiness. The full backend suite now has **62 tests
 passing**; Ruff and Bash syntax checks pass. Installing missing system runtimes from a
 fresh machine was not exercised because uv, Node and FFmpeg were already installed.
+
+## Partial-run and UI fixes 2026-10-05
+
+The user's 54.8-second real-video run parsed the query successfully. Its first scan
+attempt ended after 121.2 seconds with an unknown outcome; the configured timeout was
+120 seconds. No scan core completed and no event was returned. The next window was not
+submitted. The historical adapter discarded the exception type, so timeout or connection
+interruption is an inference from timing, not a confirmed underlying exception.
+
+The API now derives visible diagnostics for old and new runs without rewriting the old
+journal. New provider failures retain exception type, elapsed time, timeout, frame count
+and input bytes in an error artifact, without SDK exception strings that may contain keys.
+The pipeline publishes snapshots after scan/refinement progress and each clip; interim
+events remain uncertain until global reconciliation. Cancellation/failure retains snapshots.
+
+Validation: **68 backend tests**, **10 frontend tests**, Ruff, TypeScript and Vite build
+passed. Regression cases verify preserving the first real FFmpeg clip when a later clip
+fails or the run is cancelled, historical zero-result diagnostics, blocked windows,
+secret-safe timeout details, file drops, rejected files, busy uploads and cancel controls.
+
+In the browser, the historical failure showed its 121.2-second wait and unsubmitted window.
+A synthetic file was uploaded through the native chooser. An actual fixture queue showed
+the rotating status indicator and a solid red cancel button; cancel changed the persisted
+run to cancelled. A subsequent fixture run completed with two playable clips. Both video
+elements had readyState 4 and no media error. The 390-pixel view was inspected; a hidden
+file-input overflow was corrected and the document width became 375 pixels.
+
+No historical unknown request was resubmitted and no new paid model generation was made
+by this verification. Physical OS file dragging was covered through DOM drag-event tests;
+the browser exercised the shared upload path through its native file chooser.

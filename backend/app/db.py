@@ -159,7 +159,7 @@ class Repository:
             data = json.loads(row["data"])
             if data["status"] in ("completed", "partial", "failed", "cancelled"):
                 return data
-            data.update(status="cancelled", stage="cancelled", stop_reason="user_cancelled",
+            data.update(last_stage=data["stage"], status="cancelled", stage="cancelled", stop_reason="user_cancelled",
                         updated_at=now())
             con.execute("UPDATE runs SET status='cancelled',data=? WHERE id=?",
                         (json.dumps(data), run_id))

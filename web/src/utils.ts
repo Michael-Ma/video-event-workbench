@@ -4,7 +4,7 @@ export const terminalStatuses = new Set(['completed', 'partial', 'failed', 'canc
 export const statusNames: Record<string, string> = {
   queued: '排队中', pending: '待处理', running: '处理中', completed: '处理完成',
   partial: '部分完成', failed: '处理失败', cancelled: '已取消', succeeded: '已完成',
-  interrupted: '已中断', request_unknown: '请求结果未知', submitting: '正在提交',
+  interrupted: '未执行', skipped: '已跳过', request_unknown: '请求结果未知', submitting: '等待模型响应',
 };
 export const stageNames: Record<string, string> = {
   queued: '等待执行', preparing: '准备视频', prepare: '准备视频', prepare_media: '准备视频',
@@ -63,7 +63,7 @@ export function artifactUrl(path: string): string | null {
 export function artifactRefs(value: unknown): string[] {
   const refs = new Set<string>();
   function visit(v: unknown, key = '') {
-    if (typeof v === 'string' && /(?:artifact_refs?|(?:request|response|manifest|result|plan|debug)_path|^path$|^url$)/i.test(key) && artifactUrl(v)) refs.add(v);
+    if (typeof v === 'string' && /(?:artifact_refs?|(?:request|response|error|manifest|result|plan|debug)_path|^path$|^url$)/i.test(key) && artifactUrl(v)) refs.add(v);
     else if (Array.isArray(v)) v.forEach(item => visit(item, key));
     else if (v && typeof v === 'object') Object.entries(v).forEach(([k, item]) => visit(item, k));
   }

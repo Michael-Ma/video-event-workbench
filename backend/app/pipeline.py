@@ -120,9 +120,10 @@ class Journal:
         existing = next((t for t in tasks if t["task_id"] == task_id), None)
         if existing and existing.get("response_path"):
             return
-        if any(t["status"] in ("submitting", "request_unknown") for t in tasks):
-            raise ProviderError("request_unknown", "Unsettled request intent stops new model calls",
-                                request_unknown=True)
+        unsettled = next((t for t in tasks if t["status"] in ("submitting", "request_unknown")), None)
+        if unsettled:
+            raise ProviderError("blocked_by_unknown_request", "Unsettled request intent stops new model calls",
+                                request_unknown=True, details={"blocking_task_id": unsettled["task_id"]})
         if self.call_count() >= self.config.max_calls:
             raise CallBudgetExceeded("Maximum model request count reached")
 
@@ -189,9 +190,14 @@ class Journal:
             reply = self.provider.analyze(operation, request)
         except ProviderError as exc:
             status = "request_unknown" if exc.request_unknown else "failed"
+            error_path = attempt_folder / "error.json"
+            _write_json(error_path, {"code": exc.code, "message": str(exc), "details": exc.details,
+                                     "request_unknown": exc.request_unknown})
             self.repo.upsert_task(self.run_id, task_id, stage, status,
-                                  error_code=exc.code, error=str(exc))
-            self.log(stage, exc.code, str(exc), level="error", task_id=task_id)
+                                  error_code=exc.code, error=str(exc), error_details=exc.details,
+                                  error_path=self.relative(error_path))
+            self.log(stage, exc.code, str(exc), level="error", task_id=task_id,
+                     error_details=exc.details, artifact_refs=[self.relative(error_path)])
             raise
         except Exception as exc:
             # Unknown adapters may have crossed the network boundary. Conservatively stop.
@@ -312,6 +318,41 @@ def refinement_results(response: ModelResponse, candidates: list[Candidate], man
     return results
 
 
+
+def _results_snapshot(run: dict, media: dict, spec: QuerySpec, config: RunConfig,
+                      events: list[EventResult], candidate_count: int, cov: dict,
+                      calls: int, errors: list[dict], *, provisional: bool,
+                      omitted: list[str] | None = None) -> dict:
+    records = [event.model_dump(mode="json") for event in events]
+    if provisional:
+        for event in records:
+            if event["result_bucket"] == "matched":
+                event["result_bucket"] = "uncertain"
+                event["uncertainty_reasons"] = list(dict.fromkeys(
+                    event["uncertainty_reasons"] + ["pending_global_reconciliation"]))
+    stats = {
+        "candidate_count": candidate_count, "model_calls": calls,
+        "matched": sum(e["result_bucket"] == "matched" and not e.get("duplicate_of") for e in records),
+        "uncertain": sum(e["result_bucket"] == "uncertain" and not e.get("duplicate_of") for e in records),
+        "rejected": sum(e["result_bucket"] == "rejected" for e in records),
+        "duplicates": sum(e.get("duplicate_of") is not None for e in records),
+        "clips_succeeded": sum(e["clip_status"] == "succeeded" for e in records),
+        "clips_failed": sum(e["clip_status"] == "failed" for e in records),
+    }
+    limitations = [
+        "Scan completion records successful core windows, not a guarantee of finding every event.",
+        "Explicit sampled image frames contain no audio; short events can fall between observations.",
+        "Model decisions and uncertainty are automatic outputs, not human-verified labels.",
+    ]
+    if config.provider == "fixture":
+        limitations.insert(0, "DEMO FIXTURE: results use declared events, not semantic video inference.")
+    return {"run_id": run["id"], "media_id": media["id"], "provider": config.provider,
+            "model_id": config.model_id, "query_spec": spec.model_dump(mode="json"),
+            "config": config.model_dump(mode="json"), "prompt_version": PROMPT_VERSION,
+            "events": records, "scan_complete": not cov["gaps"], "coverage": cov,
+            "stats": stats, "limitations": limitations, "errors": list(errors),
+            "omitted_event_ids": omitted or [], "provisional": provisional}
+
 def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
     """Synchronous worker entry point. It never makes a paid call in fixture mode."""
     config = RunConfig.model_validate(run["config"])
@@ -349,6 +390,18 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
         candidates: list[Candidate] = []
         candidate_windows: dict[str, Window] = {}
         scan_errors, refine_errors, clip_errors = [], [], []
+        events: list[EventResult] = []
+        refine_total, refine_done, clips_total, clips_done = 0, 0, 0, 0
+
+        def publish_snapshot(*, provisional: bool):
+            journal.check_cancelled()
+            snapshot = _results_snapshot(
+                run, media, spec, config, events, len(candidates),
+                coverage(duration, successful_ranges), journal.call_count(),
+                scan_errors + refine_errors + clip_errors, provisional=provisional)
+            _write_json(journal.folder / "progress_results.json", snapshot)
+            repo.update_run(run_id, results=snapshot)
+
 
         def save_plan():
             _write_json(journal.folder / "window_plan.json", {
@@ -364,9 +417,12 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
                 "scan_total_windows": len(effective_windows),
                 "scan_completed_windows": len(successful_ranges),
                 "candidate_count": len(candidates), "model_calls": journal.call_count(),
+                "refine_total_groups": refine_total, "refine_completed_groups": refine_done,
+                "clip_total": clips_total, "clip_completed": clips_done,
             })
 
         save_plan()
+        publish_snapshot(provisional=True)
         existing_ids = {t["task_id"] for t in repo.list_tasks(run_id)}
         for window in windows:
             if window.window_id not in existing_ids:
@@ -438,12 +494,18 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
                     raise Cancelled() from exc
                 code = getattr(exc, "code", "call_budget" if isinstance(exc, CallBudgetExceeded)
                                else "scan_failed")
-                scan_errors.append({"window_id": task_id, "code": code})
+                scan_errors.append({"window_id": task_id, "task_id": task_id, "stage": "scan",
+                                    "code": code, "message": str(exc),
+                                    "details": getattr(exc, "details", {})})
                 old = next((t for t in repo.list_tasks(run_id) if t["task_id"] == task_id), {})
-                status = "request_unknown" if old.get("status") == "request_unknown" else "failed"
-                repo.upsert_task(run_id, task_id, "scan", status, error_code=code, **fields)
-                journal.log("scan", code, str(exc), level="error", task_id=task_id)
+                status = ("request_unknown" if old.get("status") == "request_unknown" else
+                          "interrupted" if code in ("blocked_by_unknown_request", "call_budget") else "failed")
+                repo.upsert_task(run_id, task_id, "scan", status, error_code=code,
+                                 error=str(exc), error_details=getattr(exc, "details", {}), **fields)
+                if old.get("error_code") != code:
+                    journal.log("scan", code, str(exc), level="error", task_id=task_id)
             update_progress("scanning")
+            publish_snapshot(provisional=True)
 
         repo.update_run(run_id, stage="scanning")
         for window in windows:
@@ -453,10 +515,10 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
         cap_us = min(round(config.max_refine_window_s * 1_000_000),
                      math.floor((config.max_input_frames - 2) / config.refine_fps * 1_000_000))
         groups = group_candidates(candidates, cap_us)
+        refine_total = len(groups)
         _write_json(journal.folder / "candidate_groups.json", [[c.candidate_id for c in g] for g in groups])
         journal.log("grouping", "candidate_groups", f"Associated {len(candidates)} candidates into {len(groups)} groups",
                     artifact_refs=[journal.relative(journal.folder / "candidate_groups.json")])
-        events: list[EventResult] = []
         fallback_ranges: dict[str, tuple[int, int]] = {}
 
         for gi, group in enumerate(groups):
@@ -519,11 +581,14 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
                         raise Cancelled() from exc
                     code = getattr(exc, "code", "call_budget" if isinstance(exc, CallBudgetExceeded)
                                    else "refinement_failed")
-                    refine_errors.append({"group_id": group_id, "code": code})
+                    refine_errors.append({"group_id": group_id, "task_id": task_id, "stage": "refine",
+                                          "code": code, "message": str(exc),
+                                          "details": getattr(exc, "details", {})})
                     old = next((t for t in repo.list_tasks(run_id) if t["task_id"] == task_id), {})
                     status = "request_unknown" if old.get("status") == "request_unknown" else "failed"
                     repo.upsert_task(run_id, task_id, "refine", status,
-                                     error_code=code, error=str(exc), **fields)
+                                     error_code=code, error=str(exc),
+                                     error_details=getattr(exc, "details", {}), **fields)
                     journal.log("refine", code, str(exc), level="warning", task_id=task_id)
                     group_events = [_fallback(c, code, f"event_{group_id}_failed_{i:03d}")
                                     for i, c in enumerate(group)]
@@ -531,7 +596,9 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
                         fallback_ranges[event.event_id] = (a, b)
                     break
             events.extend(group_events)
+            refine_done += 1
             update_progress("refining")
+            publish_snapshot(provisional=True)
 
         events = reconcile_events(events)
         cov = coverage(duration, successful_ranges)
@@ -541,6 +608,10 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
                     event_count=len(events), omitted_event_ids=omitted,
                     artifact_refs=[journal.relative(journal.folder / "all_events.json")])
 
+        clips_total = sum(clip_range(event, config, duration, fallback_ranges.get(event.event_id)) is not None
+                          for event in events)
+        publish_snapshot(provisional=False)
+        update_progress("clipping")
         for event in events:
             journal.check_cancelled()
             repo.update_run(run_id, stage="clipping")
@@ -575,42 +646,30 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
                 if journal.cancelled():
                     raise Cancelled() from exc
                 event.clip_status = "failed"
-                clip_errors.append({"event_id": event.event_id, "code": "clip_failed"})
-                repo.upsert_task(run_id, task_id, "clip", "failed", error=str(exc))
+                clip_errors.append({"event_id": event.event_id, "task_id": task_id, "stage": "clip",
+                                    "code": "clip_failed", "message": str(exc)})
+                repo.upsert_task(run_id, task_id, "clip", "failed", error_code="clip_failed", error=str(exc))
                 journal.log("clip", "clip_failed", str(exc), level="error", event_id=event.event_id)
 
-        stats = {
-            "candidate_count": len(candidates), "model_calls": journal.call_count(),
-            "matched": sum(e.result_bucket == "matched" and not e.duplicate_of for e in events),
-            "uncertain": sum(e.result_bucket == "uncertain" and not e.duplicate_of for e in events),
-            "rejected": sum(e.result_bucket == "rejected" for e in events),
-            "duplicates": sum(e.duplicate_of is not None for e in events),
-            "clips_succeeded": sum(e.clip_status == "succeeded" for e in events),
-            "clips_failed": len(clip_errors),
-        }
-        limitations = [
-            "Scan completion records successful core windows, not a guarantee of finding every event.",
-            "Explicit sampled image frames contain no audio; short events can fall between observations.",
-            "Model decisions and uncertainty are automatic outputs, not human-verified labels.",
-        ]
-        if config.provider == "fixture":
-            limitations.insert(0, "DEMO FIXTURE: results use declared events, not semantic video inference.")
-        results = {"run_id": run_id, "media_id": media["id"], "provider": config.provider,
-                   "model_id": config.model_id, "query_spec": spec.model_dump(mode="json"),
-                   "config": config.model_dump(mode="json"), "prompt_version": PROMPT_VERSION,
-                   "events": [e.model_dump(mode="json") for e in events],
-                   "scan_complete": not cov["gaps"], "coverage": cov, "stats": stats,
-                   "limitations": limitations, "errors": scan_errors + refine_errors + clip_errors,
-                   "omitted_event_ids": omitted}
+            clips_done += 1
+            update_progress("clipping")
+            publish_snapshot(provisional=False)
+
+        results = _results_snapshot(
+            run, media, spec, config, events, len(candidates), cov, journal.call_count(),
+            scan_errors + refine_errors + clip_errors, provisional=False, omitted=omitted)
+        stats = results["stats"]
         _write_json(journal.folder / "results.json", results)
         journal.check_cancelled()
         partial = bool(cov["gaps"] or refine_errors or clip_errors)
         codes = {error["code"] for error in results["errors"]}
-        stop_reason = ("request_unknown" if "request_unknown" in codes else
+        stop_reason = ("request_timeout" if "request_timeout" in codes else
+                       "request_unknown" if codes & {"request_unknown", "blocked_by_unknown_request"} else
                        "call_budget" if "call_budget" in codes else "partial_processing" if partial else None)
         repo.update_run(run_id, status="partial" if partial else "completed", stage="completed",
                         results=results, stop_reason=stop_reason,
-                        progress={**stats, "coverage": cov, "scan_complete": not cov["gaps"]})
+                        progress={**repo.get_run(run_id).get("progress", {}), **stats,
+                                  "coverage": cov, "scan_complete": not cov["gaps"]})
         journal.log("completed", "run_partial" if partial else "run_completed",
                     "Published automatic event results", stats=stats,
                     artifact_refs=[journal.relative(journal.folder / "results.json")])
@@ -621,9 +680,10 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
         if repo.is_cancelled(run_id):
             return
         code = getattr(exc, "code", "call_budget" if isinstance(exc, CallBudgetExceeded) else "pipeline_failed")
-        error = {"code": code, "message": str(exc)}
-        repo.update_run(run_id, status="partial" if code in ("request_unknown", "call_budget") else "failed",
-                        stage="stopped", error=error, stop_reason=code)
+        error = {"code": code, "message": str(exc), "details": getattr(exc, "details", {})}
+        last_stage = repo.get_run(run_id)["stage"]
+        repo.update_run(run_id, status="partial" if getattr(exc, "request_unknown", False) or code == "call_budget" else "failed",
+                        stage="stopped", last_stage=last_stage, error=error, stop_reason=code)
         if journal:
             journal.log("stopped", code, str(exc), level="error")
         else:

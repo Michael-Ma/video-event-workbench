@@ -30,3 +30,12 @@ Pydantic `EventResult` is authoritative. Its clip URL is exposed by the API.
 Errors: `{error:{code,message,retryable?,details?}}`. Missing key is a settings
 error, not an empty event list. Fixture mode is allowed only on the built-in demo.
 
+Run detail includes `diagnostics`: issues with stage, code, human-readable title/message,
+action, source range, safe details and artifact refs, plus stopped_stage and available
+event/clip counts. Older journals are interpreted at read time without mutation.
+Task errors can expose `error_details` and `error_path`.
+
+Results may be available while running. `provisional:true` marks saved intermediate
+events awaiting global reconciliation; their matched bucket is exposed as uncertain.
+After reconciliation, available clips are published incrementally. Cancelled or failed
+runs retain the last published snapshot. A zero-event partial result is not absence proof.

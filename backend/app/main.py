@@ -16,6 +16,7 @@ from starlette.concurrency import run_in_threadpool
 from .config import Settings
 from .contracts import CreateRunRequest
 from .db import Repository, new_id
+from .diagnostics import run_diagnostics
 from .media import MediaError, generate_demo, probe_video
 
 
@@ -197,7 +198,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str):
-        return {**public_run(repo.get_run(run_id)), "tasks": repo.list_tasks(run_id)}
+        run = repo.get_run(run_id)
+        tasks = repo.list_tasks(run_id)
+        return {**public_run(run), "tasks": tasks, "diagnostics": run_diagnostics(run, tasks)}
 
     @app.get("/api/runs/{run_id}/logs")
     def get_logs(run_id: str, after: int = Query(default=0, ge=0),

@@ -88,6 +88,8 @@ export interface Results {
   coverage: Coverage;
   stats: Record<string, unknown>;
   limitations: string[];
+  provisional?: boolean;
+  errors?: { code: string; message?: string; task_id?: string; window_id?: string; stage?: string }[];
 }
 
 export interface Task {
@@ -95,6 +97,8 @@ export interface Task {
   stage: string;
   status: string;
   window?: Record<string, unknown>;
+  request_intent?: { created_at?: string; operation?: string };
+  replacement_task_ids?: string[];
   [key: string]: unknown;
 }
 
@@ -106,6 +110,8 @@ export interface Run {
   query_spec?: QuerySpec | null;
   status: string;
   stage: string;
+  last_stage?: string;
+  diagnostics?: { issues: RunIssue[]; stopped_stage: string | null; unknown_requests: number; blocked_tasks: number; available_events: number; available_clips: number };
   progress: Record<string, unknown>;
   results?: Results | null;
   error?: unknown;
@@ -124,4 +130,10 @@ export interface LogEntry {
   message: string;
   details: Record<string, unknown>;
   artifact_refs?: string[];
+}
+
+export interface RunIssue {
+  task_id: string | null; stage: string; code: string; title: string; message: string;
+  action: string; technical_message?: string | null; details: Record<string, unknown>;
+  range_us?: TimeRange | null; artifact_refs: string[]; not_submitted: boolean;
 }

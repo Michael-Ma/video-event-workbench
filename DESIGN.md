@@ -35,3 +35,18 @@ Run selections survive reload via a local run ID; canonical records remain on th
 - Desktop and narrow mobile visual review, keyboard focus, long query/file-name wrapping, and no fake live content.
 
 Browser integration and rendered visual review are owned by the root integration pass; this document does not claim those checks passed before they run.
+
+## Run status and recovery refinement
+
+The working area uses neutral gray before a run, blue during queued/running work, green
+on completion, amber for partial work, red for failure and gray for cancellation. Labels,
+phase markers and a motion indicator accompany color. The top status panel states the
+current/stopped phase, responsible windows, saved events/clips and scan coverage. It shows
+the primary failure and blocked windows directly, with raw diagnostics expandable. Zero
+events after interruption is described as no available result, not a successful empty scan.
+
+Starting or selecting a run brings the panel into view; saved results have a direct jump
+link. Cancellation is a solid red 44-pixel control. Motion and scrolling respect reduced
+motion. The upload area accepts actual file drops, changes state during drag/upload, shares
+validation with the picker and rejects multiple/non-video files. Existing framework,
+semantic event buckets and original-video time mapping are preserved.
