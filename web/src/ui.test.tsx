@@ -98,4 +98,3 @@ describe('run visibility and recovery', () => {
     expect(screen.getByText(/尚未完成最终去重/)).toBeTruthy();
   });
 });
-

@@ -143,4 +143,3 @@ export function RunStatusPanel({ run, media, health, canceling, onCancel }: {
     </>}
   </section>;
 }
-

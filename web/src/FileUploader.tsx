@@ -46,4 +46,3 @@ export function FileUploader({ busy, uploading, onUpload, onError }: {
     </button>
   </div>;
 }
-

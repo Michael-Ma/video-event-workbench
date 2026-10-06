@@ -73,4 +73,3 @@ def test_cancel_during_later_clip_preserves_the_published_first_clip(tmp_path, m
     assert saved["results"]["events"][0]["clip_status"] == "succeeded"
     repo.update_run(run["id"], results={"late": True})
     assert repo.get_run(run["id"])["results"]["stats"]["clips_succeeded"] == 1
-

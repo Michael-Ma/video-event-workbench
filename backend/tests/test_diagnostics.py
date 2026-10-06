@@ -43,4 +43,3 @@ def test_resolved_split_parent_does_not_make_completed_run_look_failed():
         {"task_id": "window_b", "stage": "scan", "status": "succeeded"},
     ])
     assert diagnostics["issues"] == []
-

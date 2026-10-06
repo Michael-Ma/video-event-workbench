@@ -102,4 +102,3 @@ def run_diagnostics(run: dict, tasks: list[dict]) -> dict:
         "available_events": sum(not e.get("duplicate_of") for e in events),
         "available_clips": sum(e.get("clip_status") == "succeeded" for e in events),
     }
-
