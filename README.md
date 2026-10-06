@@ -9,9 +9,23 @@ its candidates, model responses, coverage, uncertainty, latency, and estimated c
 
 **Status:** prototype · **Interface:** English and Chinese · **Execution:** local application with cloud Gemini inference
 
-[Quick Start](#quick-start) · [Features](#features) · [Design Architecture](#design-architecture) ·
+[Demo](#demo) · [Quick Start](#quick-start) · [Features](#features) · [Design Architecture](#design-architecture) ·
 [Key Workflow](#key-workflow) · [Key Innovations](#key-innovations) · [Validation](#validation) ·
 [Documentation](#documentation)
+
+## Demo
+
+[![Basketball demo: browse detected events and play exported clips](docs/media/basketball-demo.gif)](docs/media/basketball-demo.mp4)
+
+**[Watch or download the 73-second walkthrough](https://github.com/Michael-Ma/video-event-workbench/raw/refs/heads/main/docs/media/basketball-demo.mp4)** · [Captions](docs/media/basketball-demo.srt)
+
+The recording shows the real interface with a saved Gemini run on a 54.8-second basketball
+video: query and input settings, six matched shooting clips, playback and download,
+source-video navigation, event evidence, per-call costs, and English/Chinese switching.
+It plays brief excerpts rather than the whole source video. English captions are included.
+
+The saved run took 47.7 seconds of processing and made nine model calls, with an estimated
+USD 0.039614 total. The walkthrough reuses these results; recording it makes no new model calls.
 
 ## Why this project
 

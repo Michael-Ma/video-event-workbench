@@ -1,0 +1,54 @@
+1
+00:00:00,000 --> 00:00:04,011
+A video + a natural-language query
+A real Gemini basketball example, using a 54.8-second video.
+
+2
+00:00:04,011 --> 00:00:14,166
+Choose image or video input independently
+Configure discovery and verification, sampling, concurrency and timeouts.
+
+3
+00:00:14,166 --> 00:00:20,208
+Open the saved real Gemini run
+54.8s input  /  6 matched clips  /  47.7s processing  /  9 model calls
+
+4
+00:00:20,208 --> 00:00:25,893
+Preview the source video
+This walkthrough plays only a few seconds of the basketball footage.
+
+5
+00:00:25,893 --> 00:00:38,023
+Inspect the intervals. Play the exported clips.
+Select another event to update its timestamps, reasoning and video preview.
+
+6
+00:00:38,023 --> 00:00:40,763
+Download a ready-to-use MP4 clip
+The download contains the actual exported shooting segment.
+
+7
+00:00:40,763 --> 00:00:45,227
+Jump to the same moment in the source video
+The exported clip and original footage share the same source timeline.
+
+8
+00:00:45,227 --> 00:00:51,568
+Inspect the evidence and boundary uncertainty
+Each event retains its candidates, evidence references and source-time mapping.
+
+9
+00:00:51,568 --> 00:01:00,933
+See the cost of every model call
+9 calls  /  $0.039614 estimated total  /  saved token usage and pricing
+
+10
+00:01:00,933 --> 00:01:05,797
+Switch between English and Chinese
+Queries, model evidence, event selection and cost records are preserved.
+
+11
+00:01:05,797 --> 00:01:12,992
+Video Event Workbench
+Clone github.com/Michael-Ma/video-event-workbench and run ./start.sh

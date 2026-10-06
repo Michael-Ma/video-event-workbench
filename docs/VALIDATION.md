@@ -154,3 +154,18 @@ pixels. Both languages rendered without page-level horizontal overflow. Comparin
 English and Chinese responses for a saved partial run showed equal queries, results, tasks,
 cost summaries, errors, and timestamps with translated diagnostic titles. These checks
 made no Gemini requests.
+
+## Recorded basketball walkthrough on 2026-10-06
+
+The repository demo is a 73-second recording of the actual application at 1440 by 1000
+pixels, with an English caption band added below the viewport. It uses the saved native
+video run described above: six matched clips, 47.672415 seconds of processing, nine calls,
+and USD 0.0396135 estimated usage. Configuration, source excerpts, two exported clips,
+MP4 download, source navigation, evidence, costs, and language switching were exercised.
+The actual downloaded clip was H.264, 1920 by 1080 pixels, and 2.033333 seconds long.
+
+Recording observed zero POST requests to `/api/runs` and created no new model calls.
+The final H.264/yuv420p MP4 is 1440 by 1104 pixels at 25 FPS, has no audio, and passed a
+complete decode check. Its chapter frames and captions were visually inspected. The GIF
+in the README is an eight-second excerpt of the same recording; the full source upload
+and local runtime receipts are excluded from the repository.
