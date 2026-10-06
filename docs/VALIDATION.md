@@ -46,3 +46,19 @@ The next test requires a Gemini key and complete user videos, including repeated
 short events. Hour-long decode performance, actual provider acceptance/latency/cost,
 occlusion and real camera conditions remain unmeasured. Sampled visual input and exported
 clips contain no audio. These limits are also shown in the app and source design.
+
+## Startup script follow-up
+
+The one-command `./start.sh` was exercised on this macOS environment. It synchronized
+the Python environment, installed frontend dependencies on its first run, reused them
+on subsequent runs, created a missing `.env` with permissions 0600, and passed preflight.
+Actual API, worker and frontend readiness was confirmed. Ctrl+C returned success and
+released both listening ports; the next launch reached ready again. A duplicate startup
+failed on port 8000 without stopping the existing app. Strict key mode failed clearly
+because no key was configured. No model call was made.
+
+Eight startup tests cover preserving `.env`, exported-value precedence, secret-safe
+output, optional/required key behavior, invalid configuration, occupied ports and
+requiring both worker and frontend readiness. The full backend suite now has **62 tests
+passing**; Ruff and Bash syntax checks pass. Installing missing system runtimes from a
+fresh machine was not exercised because uv, Node and FFmpeg were already installed.

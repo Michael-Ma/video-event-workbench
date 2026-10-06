@@ -11,24 +11,40 @@ without an API key; it is not a video-recognition accuracy demonstration.
 
 ## Start locally
 
-Requires Python 3.11+, [uv](https://docs.astral.sh/uv/), Node.js 22+ with npm,
-and FFmpeg/ffprobe. The checked-in dependency locks pin the Python and web environments.
+From the repository directory:
 
 ```sh
-uv sync --locked --extra dev
-npm --prefix web ci
-uv run python scripts/dev.py
+./start.sh
 ```
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173). The launcher starts the API,
-one worker, and the web UI together. Ctrl+C stops all three.
+The script installs missing uv and Node.js into the ignored `.tools/` directory,
+uses uv to prepare Python 3.13 and locked backend dependencies, and installs locked
+frontend dependencies when their manifest changes. FFmpeg/ffprobe are installed with
+Homebrew on macOS or apt on Debian/Ubuntu; system installation may request an administrator
+password. If Homebrew is missing on macOS, its official installer runs first. Other Linux
+distributions need FFmpeg preinstalled. Bootstrap downloads require curl or wget.
+
+It creates `.env` from the template only when absent, preserves existing values, gives
+exported environment variables priority, and checks the model, upload limit, writable
+data directory, video encoders and ports. The API key is never printed or passed to the
+frontend process. Key checking is local presence only; it makes no model request.
+
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173) after the script prints **[就绪]**.
+That message requires the API, worker heartbeat and frontend to be ready. Ctrl+C stops
+all three, including child processes. A port conflict fails clearly without killing the
+service already using it.
+
+```sh
+./start.sh --check              # Install/check only
+./start.sh --require-api-key    # Require a key for real-model testing
+```
 
 Use **内置示例** with **流程测试** first. The generated 12-second video has declared
 events and requires no model key. Its results validate state, time mapping and clipping;
 they do not demonstrate video-recognition accuracy.
 
-For real video recognition, copy `.env.example` to `.env`, set `GEMINI_API_KEY`,
-and restart the launcher. The key stays in the backend. Select Gemini, upload a video,
+For real video recognition, set `GEMINI_API_KEY` in the generated `.env`,
+and restart with `./start.sh`. The key stays in the backend. Select Gemini, upload a video,
 write the query, and start. The configured default is `gemini-3.8-flash`; it can be
 changed through `GEMINI_MODEL` or the run's model field. Sampled images and the query
 are sent to Google's Gemini API. No live paid model calls are made by the test suite.
