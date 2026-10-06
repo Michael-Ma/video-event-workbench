@@ -107,3 +107,33 @@ effective dates, unknown usage, persistence, cancellation, truncation, and respo
 No live paid Gemini calls were made. Fee estimates are not verified account billing receipts.
 
 Live local fixture verification: a completed run exposed five per-call zero-cost logs and task cost fields through the API. No remote Gemini request was submitted.
+
+## Image video parallel comparison 2026-10-05
+
+116 backend tests and Ruff passed; 33 frontend tests and the TypeScript/Vite build passed.
+Checks cover all four input combinations, VFR/PTS mapping, explicit video FPS/no hidden
+upload retry, atomic budgets and concurrency limits, unknown-request stopping, ordered logs,
+late cancelled cost receipts, container-duration quantization, and consistent negative mappings.
+Actual UI at desktop default size and 390px had no horizontal overflow; input selectors,
+frozen settings, per-call costs, recent-mode labels, and playable original/exported clips were verified.
+
+Authorized live Gemini comparison used IMG_0228.MOV (54.838333 seconds) and the original
+query, with scan 2 FPS/refine 6 FPS, timeout 1200s and model/clip concurrency 2. Iterations
+revealed a cross-window identity-name duplicate, 8192-token truncation dominated by thinking,
+a 666us MP4 duration-metadata discrepancy, and a consistent rejected-event mapping variant.
+Defaults now explicitly use low thinking, a 16384 output budget, and temperature 1.
+
+| Final input combination | Processing excluding queue | Calls | Model outcomes | Clips | Estimated USD |
+| --- | --- | --- | --- | --- | --- |
+| images / images | 66.805s | 9 | 5 matched, 1 rejected | 5 | 0.33533625 |
+| video / video | 47.672415s | 9 | 6 matched | 6 | 0.0396135 |
+
+The image trial's archived replies were reparsed locally after the compatibility fix;
+no new model request was made and matching decisions were unchanged. Previous derived
+results and raw receipts remain archived. The final two runs have no processing gaps or clip
+failures and retain both source candidate IDs for the overlapping-window shot.
+
+Six live trials made 57 recorded generation calls. Their known paid-Standard estimate totals
+USD 1.55335425, including truncated replies; this is not a billing receipt. The two methods
+disagree on the final shot's position requirement. No complete human labels were supplied,
+so these results do not establish recall, precision, or general superiority of either method.

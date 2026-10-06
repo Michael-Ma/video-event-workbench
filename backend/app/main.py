@@ -13,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
+from .billing import summarize_call_costs
 from .config import Settings
 from .contracts import CreateRunRequest
 from .db import Repository, new_id
@@ -200,7 +201,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def get_run(run_id: str):
         run = repo.get_run(run_id)
         tasks = repo.list_tasks(run_id)
-        return {**public_run(run), "tasks": tasks, "diagnostics": run_diagnostics(run, tasks)}
+        return {**public_run(run), "tasks": tasks, "diagnostics": run_diagnostics(run, tasks),
+                "cost_summary": summarize_call_costs(tasks)}
 
     @app.get("/api/runs/{run_id}/logs")
     def get_logs(run_id: str, after: int = Query(default=0, ge=0),

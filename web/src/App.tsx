@@ -3,7 +3,9 @@ import type { FormEvent, ReactNode } from 'react';
 import { api, jsonRequest } from './api';
 import { FileUploader } from './FileUploader';
 import { RunStatusPanel, workspaceTone } from './RunStatusPanel';
-import type { Coverage, EventResult, Health, LogEntry, Media, Profile, Provider, ResultBucket, Run, Task } from './types';
+import { FrozenRunConfig, InputModeControls } from './InputModes';
+import { CostPanel } from './CostPanel';
+import type { Coverage, EventResult, Health, InputMode, LogEntry, Media, Profile, Provider, ResultBucket, Run, Task } from './types';
 import { artifactRefs, artifactUrl, errorText, eventStart, formatTime, locationLabel, rangeLabel, readRange, stageNames, statusNames, taskRange, terminalStatuses } from './utils';
 
 const bucketNames: Record<ResultBucket, string> = { matched: '匹配', uncertain: '不确定', rejected: '已排除' };
@@ -110,12 +112,19 @@ export default function App() {
   const [query, setQuery] = useState('');
   const [provider, setProvider] = useState<Provider>('gemini');
   const [profile, setProfile] = useState<Profile>('auto');
+  const [scanInputMode, setScanInputMode] = useState<InputMode>('images');
+  const [refineInputMode, setRefineInputMode] = useState<InputMode>('images');
+  const [modelConcurrency, setModelConcurrency] = useState('2');
+  const [clipConcurrency, setClipConcurrency] = useState('2');
   const [model, setModel] = useState('');
   const [scanFps, setScanFps] = useState('');
   const [coreWindow, setCoreWindow] = useState('');
   const [maxCalls, setMaxCalls] = useState('500');
-  const [refineFps, setRefineFps] = useState('12');
-  const [requestTimeout, setRequestTimeout] = useState('120');
+  const [refineFps, setRefineFps] = useState('6');
+  const [requestTimeout, setRequestTimeout] = useState('1200');
+  const [thinkingLevel, setThinkingLevel] = useState('low');
+  const [maxOutputTokens, setMaxOutputTokens] = useState('16384');
+  const [temperature, setTemperature] = useState('1');
   const [busy, setBusy] = useState<'upload' | 'demo' | 'create' | 'cancel' | null>(null);
   const [error, setError] = useState('');
   const [pollError, setPollError] = useState('');
@@ -174,7 +183,8 @@ export default function App() {
         if (controller.signal.aborted) return;
         setMedia(prior => [source, ...prior.filter(item => item.id !== source.id)]);
         terminalPolls = terminalStatuses.has(current.status) && entries.items.length === 0 ? terminalPolls + 1 : 0;
-        if (!terminalStatuses.has(current.status) || terminalPolls < 2) timeout = setTimeout(poll, 1200);
+        const pendingCosts = (current.cost_summary?.pending_calls ?? 0) > 0 || (current.tasks ?? []).some(task => task.request_intent && ['submitting', 'running'].includes(task.status) && !task.cost);
+        if (!terminalStatuses.has(current.status) || pendingCosts || terminalPolls < 2) timeout = setTimeout(poll, 1200);
       } catch (e) {
         if (controller.signal.aborted) return;
         setPollError(`刷新运行失败：${errorText(e)}。正在重连。`);
@@ -212,7 +222,10 @@ export default function App() {
     try {
       const config = {
         provider, model_id: model || health?.default_model || 'gemini-3.8-flash', profile,
+        scan_input_mode: scanInputMode, refine_input_mode: refineInputMode,
+        model_concurrency: Number(modelConcurrency), clip_concurrency: Number(clipConcurrency),
         max_calls: Number(maxCalls), refine_fps: Number(refineFps), request_timeout_s: Number(requestTimeout),
+        thinking_level: thinkingLevel, max_output_tokens: Number(maxOutputTokens), temperature: Number(temperature),
         ...(scanFps ? { scan_fps: Number(scanFps) } : {}), ...(coreWindow ? { core_window_s: Number(coreWindow) } : {}),
       };
       const item = await api<Run>('/runs', jsonRequest({ media_id: selectedMedia.id, query: query.trim(), config }, { 'Idempotency-Key': crypto.randomUUID() }));
@@ -257,7 +270,7 @@ export default function App() {
           <section className="form-section"><div className="step-label"><span>02</span><h2>描述目标事件</h2></div>
             <label className="visually-hidden" htmlFor="query">自然语言查询</label><textarea id="query" value={query} onChange={e => setQuery(e.target.value)} required minLength={2} maxLength={4000} rows={5} placeholder="例如：找出机械臂每次抓取物体的完整尝试，保留失败尝试，排除等待。" />
             <div className="template-row"><span>试试</span>{templates.map(template => <button type="button" key={template.title} onClick={() => { setQuery(template.query); setProfile(template.profile); }}>{template.title}</button>)}</div>
-            <div className="field"><label htmlFor="profile">处理预设</label><select id="profile" value={profile} onChange={e => setProfile(e.target.value as Profile)}><option value="auto">自动 · 由查询选择</option><option value="action">动作区间 · 接近、抓取等过程</option><option value="point">短促时刻 · 触地、接触等事件</option></select><p className="field-help">预设控制扫描密度；要找的内容始终以查询为准。</p></div>
+            <div className="field"><label htmlFor="profile">处理预设</label><select id="profile" value={profile} onChange={e => setProfile(e.target.value as Profile)}><option value="auto">auto · 根据 QuerySpec 选择</option><option value="action">action · 动作区间，默认 2 FPS</option><option value="point">point · 短促时刻，默认 6 FPS</option></select><p className="field-help">预设控制 scan 密度；要找的内容始终以查询为准。</p></div>
           </section>
           <section className="form-section"><div className="step-label"><span>03</span><h2>选择处理方式</h2></div>
             <label className={`provider-option ${provider === 'gemini' ? 'selected' : ''}`}><input type="radio" name="provider" value="gemini" checked={provider === 'gemini'} onChange={() => setProvider('gemini')} /><span><strong>Gemini 视频识别</strong><small>将视频抽样内容发送到模型 API</small></span><Badge status={health?.api_key_configured ? 'succeeded' : 'pending'}>{health?.api_key_configured ? '已配置密钥' : '未配置密钥'}</Badge></label>
@@ -265,19 +278,33 @@ export default function App() {
             {provider === 'fixture' && <p className="fixture-notice"><strong>非真实 AI 识别。</strong> 此模式用于验证处理、截取和显示流程，结果不能代表模型效果。</p>}
             {provider === 'gemini' && health && !health.api_key_configured && <p className="field-help">请在后端 .env 中配置 GEMINI_API_KEY。界面不接收或显示密钥。</p>}
           </section>
-          <details className="advanced"><summary>高级参数 <span>可选</span></summary><div className="advanced-fields"><div className="field"><label htmlFor="model">模型 ID</label><input id="model" value={model} onChange={e => setModel(e.target.value)} disabled={provider === 'fixture'} /></div><div className="field-pair"><div className="field"><label htmlFor="scan-fps">扫描 FPS</label><input id="scan-fps" type="number" min="0.1" max="30" step="0.1" placeholder="按预设" value={scanFps} onChange={e => setScanFps(e.target.value)} /></div><div className="field"><label htmlFor="window-length">窗口负责时长 / 秒</label><input id="window-length" type="number" min="0.1" max="120" step="0.1" placeholder="按预设" value={coreWindow} onChange={e => setCoreWindow(e.target.value)} /></div></div><div className="field-pair"><div className="field"><label htmlFor="refine-fps">精定位 FPS</label><input id="refine-fps" type="number" min="0.1" max="60" step="0.1" required value={refineFps} onChange={e => setRefineFps(e.target.value)} /></div><div className="field"><label htmlFor="max-calls">最大模型调用次数</label><input id="max-calls" type="number" min="1" max="5000" required value={maxCalls} onChange={e => setMaxCalls(e.target.value)} /></div></div><div className="field"><label htmlFor="request-timeout">模型请求超时 / 秒</label><input id="request-timeout" type="number" min="10" max="600" required value={requestTimeout} onChange={e => setRequestTimeout(e.target.value)} /></div><p className="field-help">每次运行冻结配置；修改后新建运行。较密采样会增加处理成本。</p></div></details>
+          <section className="form-section"><div className="step-label"><span>04</span><h2>分别选择输入方式</h2></div>
+            <InputModeControls scanMode={scanInputMode} refineMode={refineInputMode} onScanChange={setScanInputMode} onRefineChange={setRefineInputMode} profile={profile} disabled={busy === 'create'} />
+          </section>
+          <details className="advanced"><summary>高级参数 <span>可选</span></summary><div className="advanced-fields">
+            <div className="field"><label htmlFor="model">模型 ID</label><input id="model" value={model} onChange={e => setModel(e.target.value)} disabled={provider === 'fixture'} /></div>
+            <div className="field-pair"><div className="field"><label htmlFor="scan-fps">scan FPS · 可覆盖预设</label><input id="scan-fps" type="number" min="0.1" max={scanInputMode === "video" ? 24 : 30} step="0.1" placeholder="按预设" value={scanFps} onChange={e => setScanFps(e.target.value)} /></div><div className="field"><label htmlFor="window-length">窗口负责时长 / 秒</label><input id="window-length" type="number" min="0.1" max="120" step="0.1" placeholder="按预设" value={coreWindow} onChange={e => setCoreWindow(e.target.value)} /></div></div>
+            <div className="field-pair"><div className="field"><label htmlFor="refine-fps">refine FPS</label><input id="refine-fps" type="number" min="0.1" max={refineInputMode === "video" ? 24 : 60} step="0.1" required value={refineFps} onChange={e => setRefineFps(e.target.value)} /></div><div className="field"><label htmlFor="max-calls">最大模型调用次数</label><input id="max-calls" type="number" min="1" max="5000" required value={maxCalls} onChange={e => setMaxCalls(e.target.value)} /></div></div>
+            <div className="field-pair"><div className="field"><label htmlFor="model-concurrency">model 并行数</label><input id="model-concurrency" type="number" min="1" max="8" step="1" required value={modelConcurrency} onChange={e => setModelConcurrency(e.target.value)} /></div><div className="field"><label htmlFor="clip-concurrency">clip 并行数</label><input id="clip-concurrency" type="number" min="1" max="4" step="1" required value={clipConcurrency} onChange={e => setClipConcurrency(e.target.value)} /></div></div>
+            <div className="field"><label htmlFor="request-timeout">模型请求超时 / 秒</label><input id="request-timeout" type="number" min="10" max="3600" required value={requestTimeout} onChange={e => setRequestTimeout(e.target.value)} /></div>
+            <div className="field-pair"><div className="field"><label htmlFor="thinking-level">thinking level</label><select id="thinking-level" value={thinkingLevel} onChange={e => setThinkingLevel(e.target.value)} disabled={provider === 'fixture'}><option value="low">low · 默认</option><option value="medium">medium</option><option value="high">high</option><option value="default">模型默认</option></select></div><div className="field"><label htmlFor="max-output-tokens">输出 token 上限</label><input id="max-output-tokens" type="number" min="512" max="32768" step="1" required value={maxOutputTokens} onChange={e => setMaxOutputTokens(e.target.value)} /></div></div>
+            <div className="field"><label htmlFor="temperature">temperature</label><input id="temperature" type="number" min="0" max="2" step="0.1" required value={temperature} onChange={e => setTemperature(e.target.value)} /></div>
+            <p className="field-help">输出预算包含 thinking。默认 low 为 JSON 留出预算，temperature 1 沿用 Gemini 3 建议值；其他模型请选模型默认 thinking。</p>
+            <p className="field-help">每次运行冻结配置；修改后新建运行。并行数控制同时处理的数量，较密采样会增加处理成本。</p>
+          </div></details>
           {health && (!health.ffmpeg_available || !health.ffprobe_available) && <p className="error-text">后端缺少 FFmpeg 或 FFprobe，暂时无法处理视频。</p>}
           {health && !health.worker_alive && <p className="field-help">后台 Worker 尚未在线。新任务会留在队列中，等待 Worker 启动。</p>}
           {!health && <button type="button" className="text-button" onClick={() => { setError(''); void refreshLists(); }}>重新连接后端</button>}
           <button className="button button-primary start-button" type="submit" disabled={cannotStart}>{busy === 'create' ? '正在创建任务…' : '开始定位事件'}<Icon name="arrow" /></button>
           <p className="form-footnote">自动识别结果可供检查与下载，未经人工标注确认。</p>
         </form>
-        {runs.length > 0 && <section className="history"><div className="section-line"><h2>最近运行</h2><span className="muted small">{runs.length}</span></div>{runs.slice(0, 8).map(item => <button type="button" key={item.id} className={`history-item ${runId === item.id ? 'selected' : ''}`} onClick={() => setRunId(item.id)}><span className="history-query">{item.query}</span><span className="history-meta"><time>{new Date(item.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })}</time><Badge status={item.status} /></span></button>)}</section>}
+        {runs.length > 0 && <section className="history"><div className="section-line"><h2>最近运行</h2><span className="muted small">{runs.length}</span></div>{runs.slice(0, 8).map(item => <button type="button" key={item.id} className={`history-item ${runId === item.id ? 'selected' : ''}`} onClick={() => setRunId(item.id)}><span className="history-query">{item.query}</span><span className="history-input-mode mono">{item.config.scan_input_mode && item.config.refine_input_mode ? `${item.config.scan_input_mode} → ${item.config.refine_input_mode}` : '输入方式未记录'}</span><span className="history-meta"><time>{new Date(item.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })}</time><Badge status={item.status} /></span></button>)}</section>}
       </aside>
       <main ref={workspaceRef} id="main-workspace" className={`workspace workspace-${workspaceTone(run)}`} tabIndex={-1}>
         {(error || pollError) && <div className="error-banner" role="alert"><Icon name="alert" /><div>{error || pollError}</div>{error && <button type="button" className="text-button" onClick={() => setError('')} aria-label="关闭错误提示">关闭</button>}</div>}
         <RunStatusPanel run={run} media={runMedia ?? selectedMedia} health={health} canceling={busy === 'cancel'}
           onCancel={() => void cancelRun()} />
+        {run && <FrozenRunConfig run={run} />}
         {isFixtureRun && <div className="fixture-banner"><Icon name="alert" /><p><strong>工程测试模式 · 非真实 AI 识别</strong><span>当前结果来自内置测试规则，用于检查时间映射、片段截取和界面流程。</span></p></div>}
         <section className="source-section" aria-labelledby="source-title"><div className="section-line"><h3 id="source-title">原视频</h3>{viewerMedia && <span className="source-filename">{viewerMedia.filename}</span>}</div>
           {sourceUrl ? <video ref={sourceVideo} key={viewerMedia?.id} className="source-player" src={sourceUrl} controls preload="metadata" aria-label="原视频播放器" onLoadedMetadata={() => setSourceError(false)} onError={() => setSourceError(true)} /> : <div className="source-placeholder"><span className="placeholder-film"><Icon name="film" size={40} /></span><h3>{viewerMedia ? '正在准备可播放视频' : '视频与定位结果会显示在这里'}</h3><p>{viewerMedia ? '保留当前任务，等待视频处理完成。' : '支持长视频中的重复动作、短促时刻和完整活动区间。'}</p><div className="placeholder-flow"><span>导入视频</span><i>→</i><span>定位事件</span><i>→</i><span>查看片段</span></div></div>}
@@ -285,6 +312,7 @@ export default function App() {
           {viewerMedia && <div className="source-footer"><span>{formatTime(viewerMedia.duration_us)}<span className="divider">/</span>{viewerMedia.is_demo ? '内置测试视频' : '上传原片'}</span>{viewerMedia.original_url && <a href={viewerMedia.original_url} download>下载原视频 ↗</a>}</div>}
         </section>
         {run && <CoveragePanel run={run} media={runMedia} />}
+        <CostPanel run={run} logs={logs} />
         {run && <section className="results-section" aria-labelledby="results-title"><div className="section-line"><h2 id="results-title">事件结果 <span className="count">{events.length}</span></h2><span className="muted small">{run.results?.provisional ? "中间结果 · 尚未定稿" : "模型结果 · 只读"}</span></div>
           <div className="filters" aria-label="按识别结果筛选">{(['all', 'matched', 'uncertain', 'rejected'] as const).map(bucket => <button type="button" key={bucket} aria-pressed={filter === bucket} className={filter === bucket ? 'active' : ''} onClick={() => { setFilter(bucket); setEventId(''); }}>{bucket === 'all' ? '全部' : bucketNames[bucket]}<span>{bucket === 'all' ? events.length : events.filter(event => event.result_bucket === bucket).length}</span></button>)}</div>
           {filteredEvents.length > 0 ? <div className="results-grid"><div className="event-list" aria-label="事件列表">{filteredEvents.map((event, index) => <button type="button" key={event.event_id} onClick={() => setEventId(event.event_id)} className={`event-card ${selectedEvent?.event_id === event.event_id ? 'selected' : ''}`} aria-pressed={selectedEvent?.event_id === event.event_id}><div className="event-card-top"><span className="event-number">{String(index + 1).padStart(2, '0')}</span><Badge status={event.result_bucket}>{bucketNames[event.result_bucket]}</Badge></div><strong className="mono">{locationLabel(event.location)}</strong><p>{event.reason || (event.location.kind === 'point' ? '事件时刻' : '动作区间')}</p><span className="event-card-foot">{event.clip?.kind === 'context_fallback' ? '上下文预览' : event.clip_status === 'succeeded' ? '片段已就绪' : event.clip_status === 'failed' ? '截取失败' : event.result_bucket === 'rejected' ? '保留排除理由' : '等待片段'}<Icon name="arrow" size={14} /></span></button>)}</div>{selectedEvent && <EventDetails event={selectedEvent} seekSource={seekSource} />}</div> : <div className="results-empty"><Icon name={active ? 'film' : run.status === 'completed' ? 'check' : 'alert'} size={28} /><h3>{active ? '正在定位事件' : events.length ? '此分类没有事件' : run.status === 'completed' ? '处理完成，没有返回匹配事件' : '尚未生成可展示的事件'}</h3><p>{active ? '扫描与局部核实的进展会持续显示在覆盖范围和处理记录中。' : events.length ? '切换到其他分类查看结果。' : run.status === 'completed' ? '空结果仅表示本次模型未返回事件；可调整查询或采样配置后重新运行。' : run.status === 'partial' || run.status === 'failed' ? '运行在事件结果生成前停止。上方整体状态显示具体错误及未完成步骤。' : '运行已取消。已经保存的结果会在这里保留。'}</p></div>}

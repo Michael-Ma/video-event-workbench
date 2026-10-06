@@ -114,3 +114,25 @@ def test_results_include_public_clip_link_without_mutating_journal(client):
     results = client.get(f"/api/runs/{run['id']}/results").json()
     assert results["events"][0]["clip"]["url"].endswith("event%201.mp4")
     assert "url" not in repo.get_run(run["id"])["results"]["events"][0]["clip"]
+
+
+def test_input_modes_timeout_and_concurrency_are_frozen_and_cost_summary_is_exposed(client):
+    media = register(client)
+    payload = request_body(media)
+    payload["config"].update(scan_input_mode="video", refine_input_mode="images", model_concurrency=2)
+    response = client.post("/api/runs", json=payload)
+    assert response.status_code == 202
+    current = client.get(f"/api/runs/{response.json()['id']}").json()
+    assert current["config"]["scan_input_mode"] == "video"
+    assert current["config"]["refine_input_mode"] == "images"
+    assert current["config"]["request_timeout_s"] == 1200
+    assert current["config"]["refine_fps"] == 6
+    assert current["config"]["thinking_level"] == "low"
+    assert current["config"]["max_output_tokens"] == 16384
+    assert current["config"]["temperature"] == 1
+    assert current["cost_summary"]["total_calls"] == 0
+    assert current["cost_summary"]["estimated_usd"] is None
+    payload["config"].update(refine_input_mode="video", refine_fps=25)
+    assert client.post("/api/runs", json=payload).status_code == 422
+    payload["config"].update(refine_fps=6, model_concurrency=9)
+    assert client.post("/api/runs", json=payload).status_code == 422

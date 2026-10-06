@@ -4,8 +4,10 @@ from __future__ import annotations
 import json
 import math
 import os
+import threading
 import time
 import uuid
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,7 @@ from .algorithms import (
     extent,
     group_candidates,
     map_model_event,
+    model_evidence_refs,
     plan_windows,
     reconcile_events,
     select_occurrences,
@@ -98,6 +101,13 @@ class Journal:
         self.repo, self.settings, self.config, self.provider = repo, settings, config, provider
         self.folder = _safe_path(settings, f"runs/{self.run_id}")
         self.folder.mkdir(parents=True, exist_ok=True)
+        self._submission_lock = threading.RLock()
+        self._log_lock = threading.RLock()
+        self._active_tasks: set[str] = set()
+        self._model_slots = threading.BoundedSemaphore(config.model_concurrency)
+        self._unknown_task_id: str | None = None
+        if callable(getattr(provider, "bind_cancelled", None)):
+            provider.bind_cancelled(self.cancelled)
 
     def cancelled(self) -> bool:
         return self.repo.is_cancelled(self.run_id)
@@ -110,25 +120,31 @@ class Journal:
         return str(path.resolve().relative_to(self.settings.data_dir.resolve()))
 
     def log(self, stage: str, code: str, message: str, level="info", **details):
-        entry = self.repo.log(self.run_id, stage, code, message, level, details)
-        with (self.folder / "debug.jsonl").open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        with self._log_lock:
+            entry = self.repo.log(self.run_id, stage, code, message, level, details)
+            with (self.folder / "debug.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     def call_count(self) -> int:
         return sum(bool(t.get("request_intent")) for t in self.repo.list_tasks(self.run_id))
 
     def preflight(self, task_id: str):
-        self.check_cancelled()
-        tasks = self.repo.list_tasks(self.run_id)
-        existing = next((t for t in tasks if t["task_id"] == task_id), None)
-        if existing and existing.get("response_path"):
-            return
-        unsettled = next((t for t in tasks if t["status"] in ("submitting", "request_unknown")), None)
-        if unsettled:
-            raise ProviderError("blocked_by_unknown_request", "Unsettled request intent stops new model calls",
-                                request_unknown=True, details={"blocking_task_id": unsettled["task_id"]})
-        if self.call_count() >= self.config.max_calls:
-            raise CallBudgetExceeded("Maximum model request count reached")
+        with self._submission_lock:
+            self.check_cancelled()
+            tasks = self.repo.list_tasks(self.run_id)
+            existing = next((t for t in tasks if t["task_id"] == task_id), None)
+            if existing and existing.get("response_path"):
+                return
+            if self._unknown_task_id is not None:
+                raise ProviderError("blocked_by_unknown_request", "Unsettled request intent stops new model calls",
+                                    request_unknown=True, details={"blocking_task_id": self._unknown_task_id})
+            unsettled = next((t for t in tasks if t["status"] == "request_unknown" or
+                              (t["status"] == "submitting" and t["task_id"] not in self._active_tasks)), None)
+            if unsettled:
+                raise ProviderError("blocked_by_unknown_request", "Unsettled request intent stops new model calls",
+                                    request_unknown=True, details={"blocking_task_id": unsettled["task_id"]})
+            if self.call_count() >= self.config.max_calls:
+                raise CallBudgetExceeded("Maximum model request count reached")
 
     def _validate(self, reply: ProviderReply, operation: str):
         if reply.finish_reason in ("MAX_TOKENS", "LENGTH"):
@@ -159,115 +175,141 @@ class Journal:
                  artifact_refs=[self.relative(artifact_path)])
 
     def call(self, task_id: str, stage: str, operation: str, request: dict, **fields):
-        self.check_cancelled()
-        existing = next((t for t in self.repo.list_tasks(self.run_id)
-                         if t["task_id"] == task_id), None)
-        if existing and existing.get("response_path"):
-            # Re-parse a persisted reply, including one which was incomplete. This allows
-            # deterministic recovery/splitting without repeating the original paid call.
-            saved = json.loads(_safe_path(self.settings, existing["response_path"]).read_text())
-            reply = ProviderReply(**saved)
-            parsed = self._validate(reply, operation)
-            self.log(stage, "response_reused", "Reused a persisted response", task_id=task_id)
-            return parsed
-        if existing and existing["status"] in ("submitting", "request_unknown"):
-            self.repo.upsert_task(self.run_id, task_id, stage, "request_unknown")
-            raise ProviderError("request_unknown", "A prior request outcome is unknown; "
-                                "it was not sent again", request_unknown=True)
-        if existing and existing["status"] == "failed" and existing.get("request_intent"):
-            raise ProviderError(existing.get("error_code", "prior_request_failed"),
-                                "A prior request failed; its paid call is not repeated")
-        self.preflight(task_id)
-        if self.call_count() >= self.config.max_calls:
-            self.repo.upsert_task(self.run_id, task_id, stage, "interrupted",
-                                  error_code="call_budget", **fields)
-            raise CallBudgetExceeded("Maximum model request count reached")
-        attempt_id = uuid.uuid4().hex
-        submitted_at = now()
-        pricing = pricing_snapshot(self.config.provider, self.config.model_id,
-                                   date.fromisoformat(submitted_at[:10]))
-        attempt_folder = self.folder / stage / task_id / attempt_id
-        request_path, response_path = attempt_folder / "request.json", attempt_folder / "response.json"
-        debug_request = dict(request)
-        debug_request["frames"] = [{**f, "path": self.relative(Path(f["path"]))}
-                                   for f in request.get("frames", [])]
-        _write_json(request_path, {
-            "operation": operation, "prompt_version": PROMPT_VERSION,
-            "model_id": self.config.model_id, "provider": self.config.provider,
-            "request": debug_request, "pricing": pricing,
-        })
-        # SQLite commits with synchronous=FULL before the network boundary.
-        self.repo.upsert_task(
-            self.run_id, task_id, stage, "submitting", attempt_id=attempt_id,
-            request_intent={"operation": operation, "created_at": submitted_at,
-                            "model_id": self.config.model_id, "pricing": pricing},
-            request_path=self.relative(request_path), **fields,
-        )
-        self.log(stage, "request_submitting", "Persisted request intent before model submission",
-                 task_id=task_id, attempt_id=attempt_id,
-                 artifact_refs=[self.relative(request_path)])
+        while not self._model_slots.acquire(timeout=0.1):
+            self.check_cancelled()
+        try:
+            return self._call_reserved(task_id, stage, operation, request, **fields)
+        finally:
+            self._model_slots.release()
+
+    def _call_reserved(self, task_id: str, stage: str, operation: str, request: dict, **fields):
+        # Reserve the budget and durable intent atomically; never hold this lock over
+        # the remote request. Only this live Journal owns its active submitting tasks.
+        with self._submission_lock:
+            self.check_cancelled()
+            existing = next((t for t in self.repo.list_tasks(self.run_id)
+                             if t["task_id"] == task_id), None)
+            if existing and existing.get("response_path"):
+                saved = json.loads(_safe_path(self.settings, existing["response_path"]).read_text())
+                reply = ProviderReply(**saved)
+                parsed = self._validate(reply, operation)
+                self.log(stage, "response_reused", "Reused a persisted response", task_id=task_id)
+                return parsed
+            if existing and existing["status"] in ("submitting", "request_unknown"):
+                if task_id in self._active_tasks:
+                    raise ProviderError("task_in_flight", "This task already has a live request")
+                self.repo.upsert_task(self.run_id, task_id, stage, "request_unknown")
+                raise ProviderError("request_unknown", "A prior request outcome is unknown; "
+                                    "it was not sent again", request_unknown=True)
+            if existing and existing["status"] == "failed" and existing.get("request_intent"):
+                raise ProviderError(existing.get("error_code", "prior_request_failed"),
+                                    "A prior request failed; its paid call is not repeated")
+            self.preflight(task_id)
+            attempt_id = uuid.uuid4().hex
+            submitted_at = now()
+            mode = "text" if operation == "normalize_query" else request.get("input_mode", "images")
+            pricing = pricing_snapshot(self.config.provider, self.config.model_id,
+                                       date.fromisoformat(submitted_at[:10]))
+            attempt_folder = self.folder / stage / task_id / attempt_id
+            request_path = attempt_folder / "request.json"
+            response_path = attempt_folder / "response.json"
+            debug_request = dict(request)
+            debug_request["frames"] = [
+                {**f, "path": self.relative(Path(f["path"]))} if f.get("path") else dict(f)
+                for f in request.get("frames", [])]
+            if request.get("video"):
+                debug_request["video"] = {**request["video"],
+                                           "path": self.relative(Path(request["video"]["path"]))}
+            _write_json(request_path, {
+                "operation": operation, "prompt_version": PROMPT_VERSION,
+                "model_id": self.config.model_id, "provider": self.config.provider,
+                "request": debug_request, "pricing": pricing,
+            })
+            self.repo.upsert_task(
+                self.run_id, task_id, stage, "submitting", attempt_id=attempt_id,
+                request_intent={"operation": operation, "created_at": submitted_at,
+                                "model_id": self.config.model_id, "input_mode": mode,
+                                "pricing": pricing},
+                request_path=self.relative(request_path), **{**fields, "input_mode": mode},
+            )
+            self._active_tasks.add(task_id)
+            self.log(stage, "request_submitting", "Persisted request intent before model submission",
+                     task_id=task_id, attempt_id=attempt_id, input_mode=mode,
+                     active_requests=len(self._active_tasks),
+                     artifact_refs=[self.relative(request_path)])
         started = time.monotonic()
         try:
-            reply = self.provider.analyze(operation, request)
-        except ProviderError as exc:
-            status = "request_unknown" if exc.request_unknown else "failed"
-            cost = estimate_call_cost(pricing, {}, outcome_unknown=exc.request_unknown)
-            error_path = attempt_folder / "error.json"
-            _write_json(error_path, {"code": exc.code, "message": str(exc), "details": exc.details,
-                                     "request_unknown": exc.request_unknown, "cost": cost})
-            self.repo.upsert_task(self.run_id, task_id, stage, status,
-                                  error_code=exc.code, error=str(exc), error_details=exc.details,
-                                  error_path=self.relative(error_path), cost=cost)
-            self.log_call_cost(stage, operation, task_id, attempt_id, cost,
-                               metrics=exc.details, artifact_path=error_path)
-            self.log(stage, exc.code, str(exc), level="error", task_id=task_id,
-                     error_details=exc.details, artifact_refs=[self.relative(error_path)])
-            raise
-        except Exception as exc:
-            # Unknown adapters may have crossed the network boundary. Conservatively stop.
-            cost = estimate_call_cost(pricing, {}, outcome_unknown=True)
-            error_path = attempt_folder / "error.json"
-            _write_json(error_path, {"code": "adapter_unknown", "request_unknown": True, "cost": cost})
-            self.repo.upsert_task(self.run_id, task_id, stage, "request_unknown",
-                                  error_code="adapter_unknown", cost=cost,
-                                  error_path=self.relative(error_path))
-            self.log_call_cost(stage, operation, task_id, attempt_id, cost,
-                               artifact_path=error_path)
-            raise ProviderError("request_unknown", "Unexpected adapter failure; request outcome "
-                                "is unknown", request_unknown=True) from exc
-        reply.cost = estimate_call_cost(pricing, reply.usage)
-        _write_json(response_path, {
-            "payload": reply.payload, "raw": reply.raw, "usage": reply.usage,
-            "finish_reason": reply.finish_reason, "error": reply.error, "cost": reply.cost,
-        })
-        current = next(t for t in self.repo.list_tasks(self.run_id) if t["task_id"] == task_id)
-        if current.get("attempt_id") != attempt_id:
-            raise ProviderError("stale_attempt", "A newer attempt owns this task")
-        self.repo.upsert_task(self.run_id, task_id, stage, current["status"], cost=reply.cost)
-        self.log_call_cost(stage, operation, task_id, attempt_id, reply.cost, usage=reply.usage,
-                           metrics=reply.raw.get("request_metrics", {
-                               "elapsed_s": round(time.monotonic() - started, 3),
-                               "latency_scope": "provider_adapter",
-                           }), artifact_path=response_path)
-        # Keep late responses as artifacts but do not publish them into cancelled work.
-        if self.cancelled():
-            self.repo.upsert_task(self.run_id, task_id, stage, "cancelled",
+            try:
+                reply = self.provider.analyze(operation, request)
+            except ProviderError as exc:
+                if exc.request_unknown:
+                    with self._submission_lock:
+                        self._unknown_task_id = task_id
+                status = "request_unknown" if exc.request_unknown else "failed"
+                cost = estimate_call_cost(pricing, {}, outcome_unknown=exc.request_unknown)
+                error_path = attempt_folder / "error.json"
+                _write_json(error_path, {"code": exc.code, "message": str(exc), "details": exc.details,
+                                         "request_unknown": exc.request_unknown, "cost": cost})
+                self.repo.upsert_task(self.run_id, task_id, stage, status,
+                                      error_code=exc.code, error=str(exc), error_details=exc.details,
+                                      error_path=self.relative(error_path), cost=cost,
+                                      request_metrics=exc.details)
+                self.log_call_cost(stage, operation, task_id, attempt_id, cost,
+                                   metrics=exc.details, artifact_path=error_path)
+                self.log(stage, exc.code, str(exc), level="error", task_id=task_id,
+                         error_details=exc.details, artifact_refs=[self.relative(error_path)])
+                raise
+            except Exception as exc:
+                with self._submission_lock:
+                    self._unknown_task_id = task_id
+                cost = estimate_call_cost(pricing, {}, outcome_unknown=True)
+                error_path = attempt_folder / "error.json"
+                _write_json(error_path, {"code": "adapter_unknown", "request_unknown": True, "cost": cost})
+                self.repo.upsert_task(self.run_id, task_id, stage, "request_unknown",
+                                      error_code="adapter_unknown", cost=cost,
+                                      error_path=self.relative(error_path))
+                self.log_call_cost(stage, operation, task_id, attempt_id, cost,
+                                   artifact_path=error_path)
+                raise ProviderError("request_unknown", "Unexpected adapter failure; request outcome "
+                                    "is unknown", request_unknown=True) from exc
+            reply.cost = estimate_call_cost(pricing, reply.usage)
+            metrics = reply.raw.get("request_metrics", {
+                "elapsed_s": round(time.monotonic() - started, 3),
+                "latency_scope": "provider_adapter", "input_mode": mode,
+            })
+            _write_json(response_path, {
+                "payload": reply.payload, "raw": reply.raw, "usage": reply.usage,
+                "finish_reason": reply.finish_reason, "error": reply.error, "cost": reply.cost,
+            })
+            current = next(t for t in self.repo.list_tasks(self.run_id) if t["task_id"] == task_id)
+            if current.get("attempt_id") != attempt_id:
+                raise ProviderError("stale_attempt", "A newer attempt owns this task")
+            self.repo.upsert_task(self.run_id, task_id, stage, current["status"], cost=reply.cost,
+                                  usage=reply.usage, request_metrics=metrics)
+            self.log_call_cost(stage, operation, task_id, attempt_id, reply.cost, usage=reply.usage,
+                               metrics=metrics, artifact_path=response_path)
+            if self.cancelled():
+                self.repo.upsert_task(self.run_id, task_id, stage, "cancelled",
+                                      response_path=self.relative(response_path), usage=reply.usage)
+                raise Cancelled("Response arrived after cancellation")
+            try:
+                parsed = self._validate(reply, operation)
+            except (ValidationError, InvalidModelOutput, IncompleteResponse) as exc:
+                self.repo.upsert_task(self.run_id, task_id, stage, "failed",
+                                      response_path=self.relative(response_path), usage=reply.usage,
+                                      error_code="invalid_response", error=str(exc))
+                self.log(stage, "invalid_response", str(exc), level="warning", task_id=task_id,
+                         artifact_refs=[self.relative(response_path)])
+                raise
+            self.repo.upsert_task(self.run_id, task_id, stage, "succeeded",
                                   response_path=self.relative(response_path), usage=reply.usage)
-            raise Cancelled("Response arrived after cancellation")
-        try:
-            parsed = self._validate(reply, operation)
-        except (ValidationError, InvalidModelOutput, IncompleteResponse) as exc:
-            self.repo.upsert_task(self.run_id, task_id, stage, "failed",
-                                  response_path=self.relative(response_path), usage=reply.usage,
-                                  error_code="invalid_response", error=str(exc))
-            self.log(stage, "invalid_response", str(exc), level="warning", task_id=task_id,
-                     artifact_refs=[self.relative(response_path)])
-            raise
-        self.repo.upsert_task(self.run_id, task_id, stage, "succeeded",
-                              response_path=self.relative(response_path), usage=reply.usage)
-        self.log(stage, "response_received", "Saved and validated model response",
-                 task_id=task_id, artifact_refs=[self.relative(response_path)])
-        return parsed
+            self.log(stage, "response_received", "Saved and validated model response",
+                     task_id=task_id, artifact_refs=[self.relative(response_path)])
+            return parsed
+        finally:
+            with self._submission_lock:
+                self._active_tasks.discard(task_id)
+
 
 
 def _model_request(spec: QuerySpec, manifest: dict, config: RunConfig,
@@ -294,7 +336,46 @@ def _model_request(spec: QuerySpec, manifest: dict, config: RunConfig,
         "max_observed_gap_us": manifest.get("max_gap_us"),
         "max_events": config.max_events_per_window,
         "candidates": candidate_inputs,
+        "input_mode": manifest.get("input_mode", "images"),
+        "sample_fps": manifest.get("sample_fps"),
+        **({"video": manifest["video"]} if manifest.get("video") else {}),
     }
+
+
+def _parallel_apply(items, operation, workers: int, check_cancelled) -> None:
+    """Bound submitted work as well as running work; drain receipts before exiting."""
+    source = iter(items)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pending = set()
+
+        def submit_next():
+            check_cancelled()
+            try:
+                item = next(source)
+            except StopIteration:
+                return False
+            pending.add(pool.submit(operation, item))
+            return True
+
+        for _ in range(workers):
+            if not submit_next():
+                break
+        while pending:
+            finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in finished:
+                pending.remove(future)
+                future.result()
+                submit_next()
+
+
+def _prepare_input(media: dict, start_us: int, end_us: int, fps: float,
+                   mode: str, output: Path, settings: Settings, config: RunConfig,
+                   cancelled) -> dict:
+    prepare = media_io.prepare_video_input if mode == "video" else media_io.sample_frames
+    manifest = prepare(media, start_us, end_us, fps, config.max_input_frames, output, settings,
+                       max_width=config.max_frame_width, cancelled=cancelled)
+    manifest.update(input_mode=mode, sample_fps=fps, media_id=media["id"])
+    return manifest
 
 
 def _fallback(candidate: Candidate, reason: str, event_id: str,
@@ -327,7 +408,16 @@ def refinement_results(response: ModelResponse, candidates: list[Candidate], man
             for i in set(disposition.event_indices):
                 mappings[i].append(cid)
         elif disposition.event_indices:
-            raise InvalidModelOutput("Rejected/unresolved candidate cannot map to output events")
+            if (any(i not in mappings for i in disposition.event_indices) or
+                    any(response.events[i].decision != disposition.disposition
+                        for i in disposition.event_indices)):
+                raise InvalidModelOutput("Rejected/unresolved mapping contradicts the output event decision")
+            # Some replies express the matching decision in both fields while also
+            # explicitly identifying the corresponding event. Preserve that decision,
+            # validate the association, and never turn it into a supported match.
+            for i in set(disposition.event_indices):
+                mappings[i].append(cid)
+            disposition = disposition.model_copy(update={"disposition": "mapped_to_event"})
         dispositions[cid] = disposition
     results = []
     for index, event in enumerate(response.events):
@@ -339,7 +429,7 @@ def refinement_results(response: ModelResponse, candidates: list[Candidate], man
             event_id=f"event_{group_id}_{index:03d}", source_candidate_ids=mappings[index],
             decision=event.decision, boundary_status="unknown", result_bucket="uncertain",
             location=location, entity_key=event.entity_key,
-            evidence_refs=event.evidence_frame_ids, reason=event.reason,
+            evidence_refs=model_evidence_refs(event, manifest), reason=event.reason,
             uncertainty_reasons=event.uncertainty_reasons,
         )
         results.append(classify_event(result, config.boundary_tolerance_ms * 1000, duration_us))
@@ -378,7 +468,8 @@ def _results_snapshot(run: dict, media: dict, spec: QuerySpec, config: RunConfig
     }
     limitations = [
         "Scan completion records successful core windows, not a guarantee of finding every event.",
-        "Explicit sampled image frames contain no audio; short events can fall between observations.",
+        "Model inputs contain no audio; short events can fall between sampled observations.",
+        "Native-video evidence references timestamps; server-side sampling is not an observed JPEG log.",
         "Model decisions and uncertainty are automatic outputs, not human-verified labels.",
     ]
     if config.provider == "fixture":
@@ -392,6 +483,7 @@ def _results_snapshot(run: dict, media: dict, spec: QuerySpec, config: RunConfig
 
 def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
     """Synchronous worker entry point. It never makes a paid call in fixture mode."""
+    execution_started = time.monotonic()
     config = RunConfig.model_validate(run["config"])
     run_id = run["id"]
     journal = None
@@ -405,18 +497,25 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
             "config": config.model_dump(mode="json"), "prompt_version": PROMPT_VERSION,
         })
         repo.update_run(run_id, stage="preparing")
-        if _prepared_available(media, settings):
-            journal.log("preparing", "media_reused", "Reused prepared immutable media and source frame index")
-        else:
+        def prepare_source():
+            if _prepared_available(media, settings):
+                journal.log("preparing", "media_reused", "Reused prepared immutable media and source frame index")
+                return media
             updates = media_io.prepare_media(media, settings, journal.cancelled)
-            media = repo.update_media(media["id"], **updates,
-                                      prepared_source_signature=_source_signature(media, settings))
+            return repo.update_media(media["id"], **updates,
+                                     prepared_source_signature=_source_signature(media, settings))
+
+        # Query parsing uses no video, so it overlaps indexing/proxy preparation.
+        with ThreadPoolExecutor(max_workers=2) as preparation:
+            media_future = preparation.submit(prepare_source)
+            query_future = preparation.submit(journal.call, "normalize_query", "query", "normalize_query", {
+                "raw_query": run["query"], "profile": config.profile,
+            })
+            media = media_future.result()
+            journal.check_cancelled()
+            repo.update_run(run_id, stage="normalizing_query")
+            spec = query_future.result()
         duration = media["duration_us"]
-        journal.check_cancelled()
-        repo.update_run(run_id, stage="normalizing_query")
-        spec = journal.call("normalize_query", "query", "normalize_query", {
-            "raw_query": run["query"], "profile": config.profile,
-        })
         if spec.raw_query != run["query"]:
             journal.log("query", "raw_query_preserved", "Ignored model rewrite of original query")
         spec.raw_query = run["query"]
@@ -429,6 +528,7 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
         scan_errors, refine_errors, clip_errors = [], [], []
         events: list[EventResult] = []
         refine_total, refine_done, clips_total, clips_done = 0, 0, 0, 0
+        state_lock = threading.RLock()
 
         def publish_snapshot(*, provisional: bool):
             journal.check_cancelled()
@@ -441,11 +541,12 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
 
 
         def save_plan():
-            _write_json(journal.folder / "window_plan.json", {
-                "initial_windows": [w.model_dump(mode="json") for w in windows],
-                "effective_windows": [w.model_dump(mode="json") for w in effective_windows.values()],
-                "coverage_basis": "successful leaf core ranges, not read/context ranges",
-            })
+            with state_lock:
+                _write_json(journal.folder / "window_plan.json", {
+                    "initial_windows": [w.model_dump(mode="json") for w in windows],
+                    "effective_windows": [w.model_dump(mode="json") for w in effective_windows.values()],
+                    "coverage_basis": "successful leaf core ranges, not read/context ranges",
+                })
 
         def update_progress(stage: str):
             current = coverage(duration, successful_ranges)
@@ -474,15 +575,16 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
             fields = {**window.model_dump(), "window": window.model_dump()}
             try:
                 journal.preflight(task_id)
-                manifest = media_io.sample_frames(
+                manifest = _prepare_input(
                     media, window.read_start_us, window.read_end_us, window.sample_fps,
-                    config.max_input_frames, journal.folder / "inputs" / task_id, settings,
-                    max_width=config.max_frame_width, cancelled=journal.cancelled,
+                    config.scan_input_mode, journal.folder / "inputs" / task_id,
+                    settings, config, journal.cancelled,
                 )
                 response = journal.call(task_id, "scan", "propose",
                                         _model_request(spec, manifest, config), **fields,
                                         sampling={k: v for k, v in manifest.items() if k != "frames"})
                 invalid = []
+                local_candidates = []
                 for i, event in enumerate(response.events):
                     try:
                         location = map_model_event(event, manifest, duration, spec.event_kind,
@@ -494,11 +596,13 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
                         continue
                     candidate = Candidate(
                         candidate_id=f"{task_id}_{i:03d}", window_id=task_id, location=location,
-                        entity_key=event.entity_key, evidence_refs=event.evidence_frame_ids,
+                        entity_key=event.entity_key, evidence_refs=model_evidence_refs(event, manifest),
                         reason=event.reason,
                     )
-                    candidates.append(candidate)
-                    candidate_windows[candidate.candidate_id] = window
+                    local_candidates.append(candidate)
+                with state_lock:
+                    candidates.extend(local_candidates)
+                    candidate_windows.update({c.candidate_id: window for c in local_candidates})
                 if invalid:
                     repo.upsert_task(run_id, task_id, "scan", "failed",
                                      error_code="invalid_event", errors=invalid, **fields)
@@ -506,21 +610,23 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
                     journal.log("scan", "invalid_event", "Rejected invalid event timestamps/evidence",
                                 level="warning", task_id=task_id, errors=invalid)
                 else:
-                    successful_ranges.append((window.core_start_us, window.core_end_us))
+                    with state_lock:
+                        successful_ranges.append((window.core_start_us, window.core_end_us))
                     journal.log("scan", "window_complete", f"Window returned {len(response.events)} candidates",
                                 task_id=task_id, candidate_count=len(response.events))
             except IncompleteResponse as exc:
                 children = split_window(window) if depth < 2 else []
                 if children:
-                    effective_windows.pop(task_id, None)
-                    effective_windows.update({child.window_id: child for child in children})
+                    with state_lock:
+                        effective_windows.pop(task_id, None)
+                        effective_windows.update({child.window_id: child for child in children})
                     repo.upsert_task(run_id, task_id, "scan", "failed",
                                      replacement_task_ids=[c.window_id for c in children], **fields)
                     save_plan()
                     journal.log("scan", "window_split", "Split an incomplete window; retained its raw reply",
                                 task_id=task_id, children=[c.window_id for c in children])
-                    for child in children:
-                        scan(child, depth + 1)
+                    _parallel_apply(children, lambda child: scan(child, depth + 1),
+                                    config.model_concurrency, journal.check_cancelled)
                 else:
                     scan_errors.append({"window_id": task_id, "code": "incomplete_response"})
                     journal.log("scan", "incomplete_response", str(exc), level="warning", task_id=task_id)
@@ -541,12 +647,13 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
                                  error=str(exc), error_details=getattr(exc, "details", {}), **fields)
                 if old.get("error_code") != code:
                     journal.log("scan", code, str(exc), level="error", task_id=task_id)
-            update_progress("scanning")
-            publish_snapshot(provisional=True)
+            with state_lock:
+                update_progress("scanning")
+                publish_snapshot(provisional=True)
 
         repo.update_run(run_id, stage="scanning")
-        for window in windows:
-            scan(window)
+        _parallel_apply(windows, scan, config.model_concurrency, journal.check_cancelled)
+        candidates.sort(key=lambda c: ((extent(c.location) or (0, 0))[0], c.candidate_id))
         _write_json(journal.folder / "candidates.json", [c.model_dump(mode="json") for c in candidates])
         journal.check_cancelled()
         cap_us = min(round(config.max_refine_window_s * 1_000_000),
@@ -558,7 +665,9 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
                     artifact_refs=[journal.relative(journal.folder / "candidate_groups.json")])
         fallback_ranges: dict[str, tuple[int, int]] = {}
 
-        for gi, group in enumerate(groups):
+        def refine(item):
+            nonlocal refine_done
+            gi, group = item
             journal.check_cancelled()
             group_id = f"g{gi:05d}"
             bounds = [extent(c.location) or (candidate_windows[c.candidate_id].read_start_us,
@@ -579,16 +688,22 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
                           "read_start_us": a, "read_end_us": b, "expansion": expansion}
                 try:
                     journal.preflight(task_id)
-                    manifest = media_io.sample_frames(
-                        media, a, b, config.refine_fps, config.max_input_frames,
-                        journal.folder / "inputs" / task_id, settings,
-                        max_width=config.max_frame_width, cancelled=journal.cancelled,
+                    manifest = _prepare_input(
+                        media, a, b, config.refine_fps, config.refine_input_mode,
+                        journal.folder / "inputs" / task_id, settings, config, journal.cancelled,
                     )
                     response = journal.call(task_id, "refine", "verify_refine",
                                             _model_request(spec, manifest, config, group), **fields,
                                             sampling={k: v for k, v in manifest.items() if k != "frames"})
                     group_events = refinement_results(response, group, manifest, duration,
                                                       spec, config, group_id)
+                    compatible = [d.candidate_id for d in response.candidate_dispositions
+                                  if d.disposition != "mapped_to_event" and d.event_indices]
+                    if compatible:
+                        journal.log("refine", "candidate_mapping_normalized",
+                                    "Preserved consistent rejected/unresolved event associations",
+                                    level="warning", task_id=task_id, candidate_ids=compatible,
+                                    matching_decisions_changed=False)
                     for event in group_events:
                         if event.decision != "rejected" and (full_a < a or full_b > b):
                             event.location.open_left |= full_a < a
@@ -632,11 +747,20 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
                     for event in group_events:
                         fallback_ranges[event.event_id] = (a, b)
                     break
-            events.extend(group_events)
-            refine_done += 1
-            update_progress("refining")
-            publish_snapshot(provisional=True)
+            with state_lock:
+                events.extend(group_events)
+                refine_done += 1
+                update_progress("refining")
+                publish_snapshot(provisional=True)
 
+        repo.update_run(run_id, stage="refining")
+        _parallel_apply(enumerate(groups), refine, config.model_concurrency, journal.check_cancelled)
+        def event_order(event):
+            estimate = event.location.anchor_us if event.location.kind == "point" else event.location.start_us
+            return (estimate if estimate is not None else
+                    (extent(event.location) or (duration + 1, duration + 1))[0], event.event_id)
+
+        events.sort(key=event_order)
         events = reconcile_events(events)
         cov = coverage(duration, successful_ranges)
         _write_json(journal.folder / "all_events.json", [e.model_dump(mode="json") for e in events])
@@ -649,13 +773,13 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
                           for event in events)
         publish_snapshot(provisional=False)
         update_progress("clipping")
-        for event in events:
+        def export_clip(event):
+            nonlocal clips_done
             journal.check_cancelled()
-            repo.update_run(run_id, stage="clipping")
             cut = clip_range(event, config, duration, fallback_ranges.get(event.event_id))
             if cut is None:
                 event.clip_status = "not_required"
-                continue
+                return
             task_id = f"clip_{event.event_id}"
             attempt_id = uuid.uuid4().hex
             output = journal.folder / "clips" / event.result_bucket / event.event_id / f"{attempt_id}.mp4"
@@ -667,13 +791,14 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
                 current = next(t for t in repo.list_tasks(run_id) if t["task_id"] == task_id)
                 if current.get("attempt_id") != attempt_id:
                     raise ValueError("A newer attempt owns this clip task")
-                event.clip = ClipResult(
-                    path=journal.relative(output), cut_range_us=cut,
-                    actual_range_us=metadata.get("actual_range_us"),
-                    kind="context_fallback" if event.result_bucket == "uncertain" else "event_with_context",
-                    metadata=metadata,
-                )
-                event.clip_status = "succeeded"
+                with state_lock:
+                    event.clip = ClipResult(
+                        path=journal.relative(output), cut_range_us=cut,
+                        actual_range_us=metadata.get("actual_range_us"),
+                        kind="context_fallback" if event.result_bucket == "uncertain" else "event_with_context",
+                        metadata=metadata,
+                    )
+                    event.clip_status = "succeeded"
                 repo.upsert_task(run_id, task_id, "clip", "succeeded",
                                  artifact_path=event.clip.path, metadata=metadata)
             except Cancelled:
@@ -682,16 +807,19 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
             except Exception as exc:
                 if journal.cancelled():
                     raise Cancelled() from exc
-                event.clip_status = "failed"
-                clip_errors.append({"event_id": event.event_id, "task_id": task_id, "stage": "clip",
-                                    "code": "clip_failed", "message": str(exc)})
+                with state_lock:
+                    event.clip_status = "failed"
+                    clip_errors.append({"event_id": event.event_id, "task_id": task_id, "stage": "clip",
+                                        "code": "clip_failed", "message": str(exc)})
                 repo.upsert_task(run_id, task_id, "clip", "failed", error_code="clip_failed", error=str(exc))
                 journal.log("clip", "clip_failed", str(exc), level="error", event_id=event.event_id)
 
-            clips_done += 1
-            update_progress("clipping")
-            publish_snapshot(provisional=False)
+            with state_lock:
+                clips_done += 1
+                update_progress("clipping")
+                publish_snapshot(provisional=False)
 
+        _parallel_apply(events, export_clip, config.clip_concurrency, journal.check_cancelled)
         results = _results_snapshot(
             run, media, spec, config, events, len(candidates), cov, journal.call_count(),
             scan_errors + refine_errors + clip_errors, provisional=False, omitted=omitted)
@@ -705,6 +833,7 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
                        "call_budget" if "call_budget" in codes else "partial_processing" if partial else None)
         repo.update_run(run_id, status="partial" if partial else "completed", stage="completed",
                         results=results, stop_reason=stop_reason,
+                        processing_elapsed_s=round(time.monotonic() - execution_started, 3),
                         progress={**repo.get_run(run_id).get("progress", {}), **stats,
                                   "coverage": cov, "scan_complete": not cov["gaps"]})
         journal.log("completed", "run_partial" if partial else "run_completed",
@@ -720,7 +849,8 @@ def execute_run(run: dict, repo: Repository, settings: Settings) -> None:
         error = {"code": code, "message": str(exc), "details": getattr(exc, "details", {})}
         last_stage = repo.get_run(run_id)["stage"]
         repo.update_run(run_id, status="partial" if getattr(exc, "request_unknown", False) or code == "call_budget" else "failed",
-                        stage="stopped", last_stage=last_stage, error=error, stop_reason=code)
+                        stage="stopped", last_stage=last_stage, error=error, stop_reason=code,
+                        processing_elapsed_s=round(time.monotonic() - execution_started, 3))
         if journal:
             journal.log("stopped", code, str(exc), level="error")
         else:

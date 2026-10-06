@@ -35,6 +35,22 @@ action, source range, safe details and artifact refs, plus stopped_stage and ava
 event/clip counts. Older journals are interpreted at read time without mutation.
 Task errors can expose `error_details` and `error_path`.
 
+RunConfig freezes independent `scan_input_mode` / `refine_input_mode` (`images` or `video`),
+`model_concurrency` (default 2, 1..8), and `clip_concurrency` (default 2, 1..4).
+`request_timeout_s` defaults to 1200 (10..3600), refinement defaults to 6 FPS, and scan
+presets use 2 FPS for intervals or 6 FPS for points. Native video FPS cannot exceed 24.
+Thinking defaults to `low` with `max_output_tokens=16384` and `temperature=1`;
+`thinking_level=default` delegates to the provider for other model families. Output
+budgets include thinking. `started_at` and optional `processing_elapsed_s` separate
+processing duration from queued or offline reprocessing wait.
+Native inputs are normalized local MP4 windows with original-frame mapping. Model events
+use `evidence_times_s` for video and `evidence_frame_ids` for images; published video evidence
+references have the shape `video:<media_id>:<source_time_us>` and are not JPEG observations.
+Native `duration_validation` records explicit container duration quantization without
+relaxing the two-microsecond decoded-frame timestamp checks. Candidate dispositions with
+indices are preferred as `mapped_to_event`; rejected/unresolved variants are accepted only
+when every referenced event has that same matching decision. Contradictions still fail.
+
 Model tasks also expose `cost`: status (`estimated`, `unknown`, `not_billable`),
 `estimated_usd` (null when unknown), currency/basis, pricing version/source/effective rates,
 and token counts with input/cached-input/output components. The `model_call_cost` log
@@ -43,6 +59,10 @@ The same cost record is saved in each response/error artifact. A pricing snapsho
 before submission. Estimates use paid Standard list rates, including output thinking tokens;
 they do not assert the account's actual billed amount. Cancelled or invalid responses still
 retain available usage/cost; persisted-response reuse does not duplicate a cost log.
+Run detail adds `cost_summary` with `estimated_usd` (known subtotal, null if none),
+`estimated_calls`, `unknown_calls`, `pending_calls`, `local_calls`, `total_calls`, and
+`complete`. Only tasks with request intents count as calls. Each model task exposes
+`input_mode`, `usage` and `request_metrics` as well as cost for the visible UI ledger.
 
 Results may be available while running. `provisional:true` marks saved intermediate
 events awaiting global reconciliation; their matched bucket is exposed as uncertain.

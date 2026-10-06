@@ -56,6 +56,25 @@ function run(status = 'running'): Run {
 }
 
 describe('run visibility and recovery', () => {
+  it('separates processing time from queue time for input-mode comparisons', () => {
+    const current = run('completed');
+    current.started_at = '2026-10-05T17:00:20Z';
+    render(<RunStatusPanel run={current} health={health} canceling={false} onCancel={vi.fn()} />);
+    expect(screen.getByText(/总耗时\s*02:01/)).toBeTruthy();
+    expect(screen.getByText(/处理\s*01:41/)).toBeTruthy();
+    expect(screen.getByText(/排队\s*00:20/)).toBeTruthy();
+  });
+  it('counts in-flight request intents even before completed-window progress updates', () => {
+    const current = run();
+    current.config.provider = 'gemini';
+    current.progress.model_calls = 1;
+    current.tasks = ['query', 'scan-one', 'scan-two'].map(task_id => ({
+      task_id, stage: task_id === 'query' ? 'query' : 'scan', status: 'submitting',
+      request_intent: { operation: task_id === 'query' ? 'normalize_query' : 'propose' },
+    }));
+    render(<RunStatusPanel run={current} health={health} canceling={false} onCancel={vi.fn()} />);
+    expect(screen.getByText(/模型请求\s*3\s*次/)).toBeTruthy();
+  });
   it('has distinct idle, running and completed states with an actionable cancel control', () => {
     expect(workspaceTone(null)).toBe('idle');
     expect(workspaceTone(run())).toBe('running');

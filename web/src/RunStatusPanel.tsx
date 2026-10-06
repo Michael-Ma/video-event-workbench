@@ -66,6 +66,8 @@ export function RunStatusPanel({ run, media, health, canceling, onCancel }: {
   const stage = !active ? stoppedStage ?? run?.last_stage ?? run?.stage ?? 'queued' : run?.stage ?? 'queued';
   const current = phaseIndex[stage] ?? (active ? 0 : -1);
   const tasks = (run?.tasks ?? []).filter(task => !task.replacement_task_ids);
+  const modelCalls = run?.tasks ? run.tasks.filter(task => !!task.request_intent).length :
+    count(run?.progress.model_calls ?? run?.results?.stats.model_calls);
   const scans = tasks.filter(task => task.stage === 'scan');
   const scanDone = scans.filter(task => task.status === 'succeeded').length;
   const scanTotal = count(run?.progress.scan_total_windows) || scans.length;
@@ -76,6 +78,12 @@ export function RunStatusPanel({ run, media, health, canceling, onCancel }: {
   const percent = duration ? Math.max(0, Math.min(100, (cov?.covered_us ?? 0) / duration * 100)) : 0;
   const end = active ? now : Date.parse(run?.updated_at ?? '') || now;
   const elapsed = run ? Math.max(0, end - Date.parse(run.created_at)) * 1000 : 0;
+  const started = typeof run?.started_at === 'string' ? Date.parse(run.started_at) : NaN;
+  const processingElapsed = !active && typeof run?.processing_elapsed_s === 'number' ?
+    Math.max(0, run.processing_elapsed_s) * 1_000_000 :
+    run && Number.isFinite(started) ? Math.max(0, end - started) * 1000 : null;
+  const queueElapsed = run && Number.isFinite(started) ?
+    Math.max(0, started - Date.parse(run.created_at)) * 1000 : null;
   const waiting = tasks.slice().reverse().find(task => task.status === 'submitting');
   const intent = waiting?.request_intent;
   const waitingSeconds = intent?.created_at ? Math.max(0, Math.floor((now - Date.parse(intent.created_at)) / 1000)) : 0;
@@ -116,8 +124,10 @@ export function RunStatusPanel({ run, media, health, canceling, onCancel }: {
     {run && <>
       <div className="status-query">{run.query}<span className="status-meta">
         <span>{run.config.provider === 'fixture' ? 'FIXTURE · 工程测试' : String(run.config.model_id)}</span>
-        <span className="mono">{run.id.slice(0, 16)}</span><span>已耗时 {formatTime(elapsed)}</span>
-        <span>{run.config.provider === "fixture" ? "工程测试调用" : "模型请求"} {count(run.progress.model_calls ?? run.results?.stats.model_calls)} 次</span>
+        <span className="mono">{run.id.slice(0, 16)}</span><span>总耗时 {formatTime(elapsed)}</span>
+        {processingElapsed !== null && <span>处理 {formatTime(processingElapsed)}</span>}
+        {queueElapsed !== null && <span>排队 {formatTime(queueElapsed)}</span>}
+        <span>{run.config.provider === "fixture" ? "工程测试调用" : "模型请求"} {modelCalls} 次</span>
       </span></div>
       {active && waiting && <p className="status-wait" aria-live="off">等待模型响应 {waitingSeconds} 秒 / 上限 {String(run.config.request_timeout_s ?? 120)} 秒</p>}
       {events.length > 0 && <a className="status-results-link" href="#results-title">查看已保存结果（{events.length}） ↓</a>}

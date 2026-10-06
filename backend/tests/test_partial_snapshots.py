@@ -18,7 +18,7 @@ def setup_run(tmp_path):
     repo = Repository(settings.db_path)
     media = repo.create_media({**data, "original_path": "media/demo.mp4"})
     run, _ = repo.create_run({"media_id": media["id"], "query": "all green square intervals",
-                             "config": RunConfig(provider="fixture").model_dump()})
+                             "config": RunConfig(provider="fixture", clip_concurrency=1).model_dump()})
     return settings, repo, repo.claim_next_run()
 
 

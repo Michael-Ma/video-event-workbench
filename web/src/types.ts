@@ -1,6 +1,7 @@
 export type TimeRange = [number, number];
 export type Profile = 'auto' | 'action' | 'point';
 export type Provider = 'gemini' | 'fixture';
+export type InputMode = 'images' | 'video';
 export type ResultBucket = 'matched' | 'uncertain' | 'rejected';
 
 export interface Health {
@@ -97,7 +98,13 @@ export interface Task {
   stage: string;
   status: string;
   window?: Record<string, unknown>;
-  request_intent?: { created_at?: string; operation?: string };
+  request_intent?: { created_at?: string; operation?: string; input_mode?: string; pricing?: Record<string, unknown> };
+  attempt_id?: string;
+  input_mode?: string;
+  sampling?: Record<string, unknown>;
+  usage?: Record<string, unknown>;
+  request_metrics?: Record<string, unknown>;
+  cost?: CallCost;
   replacement_task_ids?: string[];
   [key: string]: unknown;
 }
@@ -116,9 +123,41 @@ export interface Run {
   results?: Results | null;
   error?: unknown;
   created_at: string;
+  started_at?: string;
+  processing_elapsed_s?: number;
   updated_at: string;
   tasks?: Task[];
+  cost_summary?: CostSummary;
   [key: string]: unknown;
+}
+
+export interface CallCost {
+  status: 'estimated' | 'not_billable' | 'unknown';
+  estimated_usd: number | null;
+  currency?: string;
+  provider?: string;
+  model_id?: string;
+  basis?: string;
+  pricing_version?: string;
+  pricing_source?: string;
+  submitted_on?: string;
+  effective_from?: string;
+  rates_per_million_tokens?: Record<string, number> | null;
+  token_counts?: Record<string, number> | null;
+  reason?: string;
+  [key: string]: unknown;
+}
+
+export interface CostSummary {
+  currency: 'USD';
+  estimated_usd: number | null;
+  estimated_calls: number;
+  unknown_calls: number;
+  pending_calls: number;
+  local_calls: number;
+  total_calls: number;
+  complete: boolean;
+  basis: string;
 }
 
 export interface LogEntry {

@@ -1,7 +1,7 @@
 from datetime import date
 
 import pytest
-from app.billing import estimate_call_cost, pricing_snapshot
+from app.billing import estimate_call_cost, pricing_snapshot, summarize_call_costs
 
 
 def snapshot(model="gemini-3.8-flash", day=date(2026, 10, 5)):
@@ -62,3 +62,21 @@ def test_verified_price_is_not_applied_to_older_historical_dates():
         "prompt_token_count": 10, "candidates_token_count": 1,
     })
     assert cost["status"] == "unknown" and cost["estimated_usd"] is None
+
+
+def test_cost_summary_excludes_unsubmitted_tasks_and_does_not_hide_unknown_costs():
+    tasks = [{"status": "pending"},
+             {"request_intent": {"operation": "propose"}, "status": "submitting"},
+             {"request_intent": {"operation": "verify_refine"}, "status": "request_unknown",
+              "cost": {"status": "unknown", "estimated_usd": None}},
+             {"request_intent": {"operation": "normalize_query"}, "status": "succeeded",
+              "cost": {"status": "estimated", "estimated_usd": 0.1}},
+             {"request_intent": {"operation": "propose"}, "status": "succeeded",
+              "cost": {"status": "estimated", "estimated_usd": 0.2}}]
+    summary = summarize_call_costs(tasks)
+    assert summary["estimated_usd"] == 0.3
+    assert summary["total_calls"] == 4
+    assert summary["unknown_calls"] == summary["pending_calls"] == 1
+    assert summary["complete"] is False
+    assert summarize_call_costs([])["estimated_usd"] is None
+    assert summarize_call_costs(tasks[:3])["estimated_usd"] is None

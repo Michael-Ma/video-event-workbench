@@ -47,7 +47,22 @@ For real video recognition, set `GEMINI_API_KEY` in the generated `.env`,
 and restart with `./start.sh`. The key stays in the backend. Select Gemini, upload a video,
 write the query, and start. The configured default is `gemini-3.8-flash`; it can be
 changed through `GEMINI_MODEL` or the run's model field. Sampled images and the query
-are sent to Google's Gemini API. No live paid model calls are made by the test suite.
+or prepared local video windows are sent to Google's Gemini API. The UI independently
+selects images/video for `propose` and `verify_refine`, including mixed combinations.
+Both inputs are video-only (no audio), with source-time mapping preserved. Native video
+uses the configured FPS; its server-side sampling is not an observed JPEG log.
+No live paid model calls are made by the test suite.
+
+Image sampling defaults are 2 FPS for action scans, 6 FPS for point scans, and 6 FPS
+for refinement. Per-request timeout defaults to 1200 seconds. Query parsing overlaps
+media preparation; independent scan windows and refinement groups run with a configurable
+model concurrency of 2 by default. Clip exports also default to 2 parallel jobs. Dependencies,
+atomic request budgets, cancellation, and unknown-request stopping remain enforced.
+Gemini 3 defaults also use `thinking_level=low`, `max_output_tokens=16384` (including
+thinking), and `temperature=1`; these controls are visible in advanced settings and frozen
+per run. Non-Gemini-3 models require provider-default thinking. Output truncation is retained
+as a charged response, not silently retried. Matching decisions and candidate associations
+are separate; consistent rejected/unresolved event associations preserve their decisions.
 
 Example queries:
 
@@ -69,6 +84,9 @@ cached input. The current price table covers `gemini-3.8-flash`; other models, m
 and unknown request outcomes report unknown cost rather than zero. These are list-price
 estimates, not billing receipts; free-tier use or account discounts can differ. Fixture calls
 are explicitly local and cost zero. Reusing a saved response does not log another paid call.
+The visible cost panel also lists every call, its input mode, usage and latency, with a
+known-cost subtotal and separate pending/unknown counts. Late receipts remain visible after
+cancellation; unsubmitted tasks and historical calls lacking cost records are not shown as free.
 
 State and artifacts are local in `.data/`: SQLite journal, immutable original-frame
 indexes, navigation previews, sampled JPEGs, model request/response records, results,

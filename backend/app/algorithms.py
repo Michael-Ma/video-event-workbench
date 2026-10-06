@@ -18,7 +18,7 @@ def plan_windows(duration_us: int, spec: QuerySpec, config: RunConfig) -> list[W
     point = config.profile == "point" or (
         config.profile == "auto" and spec.event_kind == "point"
     )
-    fps = config.scan_fps or (12.0 if point else 4.0)
+    fps = config.scan_fps or (6.0 if point else 2.0)
     context_us = round((config.context_s if config.context_s is not None else
                         (2.0 if point else 5.0)) * 1_000_000)
     requested_core = round((config.core_window_s or (10.0 if point else 30.0)) * 1_000_000)
@@ -81,15 +81,37 @@ def coverage(duration_us: int, ranges: Iterable[tuple[int, int]]) -> dict:
             "covered_ranges": merged, "gaps": gaps}
 
 
+def model_evidence_refs(event: ModelEvent, manifest: dict) -> list[str]:
+    """Native-video evidence is a timestamp reference, never a claimed JPEG observation."""
+    if manifest.get("input_mode", "images") != "video":
+        valid_ids = {f["frame_id"] for f in manifest.get("frames", [])}
+        if any(ref not in valid_ids for ref in event.evidence_frame_ids):
+            raise InvalidModelOutput("Evidence references a frame absent from this request")
+        if event.evidence_times_s:
+            raise InvalidModelOutput("Image evidence must reference supplied frame IDs")
+        return event.evidence_frame_ids
+    if event.evidence_frame_ids:
+        raise InvalidModelOutput("Native video evidence must use timestamps, not JPEG frame IDs")
+    origin = manifest["input_origin_us"]
+    a, b = manifest["source_range_us"]
+    references = []
+    for value in event.evidence_times_s:
+        if not math.isfinite(value) or value < 0:
+            raise InvalidModelOutput("Video evidence timestamp is invalid")
+        source = origin + round(value * 1_000_000)
+        if not max(a, origin) <= source < b:
+            raise InvalidModelOutput("Video evidence timestamp falls outside this input")
+        references.append(f"video:{manifest.get('media_id', 'input')}:{source}")
+    return list(dict.fromkeys(references))
+
+
 def map_model_event(event: ModelEvent, manifest: dict, duration_us: int,
                     expected_kind: str, *, enforce_sampling_uncertainty: bool = True) -> Location:
     """Map explicit frame-timeline seconds, never frame number / nominal FPS."""
     if event.kind != expected_kind:
         raise InvalidModelOutput("Event kind differs from the query")
     frames = manifest.get("frames", [])
-    valid_ids = {f["frame_id"] for f in frames}
-    if any(ref not in valid_ids for ref in event.evidence_frame_ids):
-        raise InvalidModelOutput("Evidence references a frame absent from this request")
+    model_evidence_refs(event, manifest)
     origin = manifest["input_origin_us"]
     a, b = manifest.get("source_range_us", [manifest.get("read_start_us", origin),
                                            manifest.get("read_end_us", duration_us)])
@@ -114,11 +136,17 @@ def map_model_event(event: ModelEvent, manifest: dict, duration_us: int,
         if lower > upper or (estimate is not None and not lower <= estimate <= upper):
             raise InvalidModelOutput("Uncertainty interval is reversed or excludes estimate")
         if enforce_sampling_uncertainty and estimate is not None and frames:
-            observed = sorted({f["source_time_us"] for f in frames})
-            position = bisect_left(observed, estimate)
-            earlier = observed[position - 1] if position else origin
-            later_position = position + int(position < len(observed) and observed[position] == estimate)
-            later = observed[later_position] if later_position < len(observed) else min(b, duration_us)
+            if manifest.get("input_mode") == "video":
+                # Native decoding/sampling is server-side; the source index is not an
+                # observation log. Bound precision using the requested sampling period.
+                period = math.ceil(1_000_000 / manifest["sample_fps"])
+                earlier, later = max(origin, estimate - period), min(b, estimate + period)
+            else:
+                observed = sorted({f["source_time_us"] for f in frames})
+                position = bisect_left(observed, estimate)
+                earlier = observed[position - 1] if position else origin
+                later_position = position + int(position < len(observed) and observed[position] == estimate)
+                later = observed[later_position] if later_position < len(observed) else min(b, duration_us)
             lower, upper = min(lower, earlier), max(upper, later)
         return lower, upper
 
@@ -159,16 +187,21 @@ def _overlaps(a: tuple[int, int], b: tuple[int, int]) -> bool:
 
 
 def group_candidates(candidates: list[Candidate], max_span_us: int) -> list[list[Candidate]]:
-    """Complete-link associations only: grouping never discards a proposal."""
+    """Complete-link associations only; cross-window identity labels may differ.
+
+    Overlapping proposals from independent windows are verified together without
+    assuming one actor or one event. Every proposal survives for the 0/1/N verifier.
+    """
     groups: list[list[Candidate]] = []
     for candidate in sorted(candidates, key=lambda c: (extent(c.location) or (0, 0))[0]):
         bounds = extent(candidate.location)
         joined = False
-        if bounds and candidate.entity_key != "unknown":
+        if bounds:
             for group in groups:
                 previous = [extent(c.location) for c in group]
-                if (all(c.entity_key == candidate.entity_key and
-                        c.location.kind == candidate.location.kind for c in group)
+                if (all(c.location.kind == candidate.location.kind and
+                        ((candidate.entity_key != "unknown" and c.entity_key == candidate.entity_key)
+                         or c.window_id != candidate.window_id) for c in group)
                         and all(p is not None and _overlaps(bounds, p) for p in previous)
                         and max([bounds[1]] + [p[1] for p in previous]) -
                         min([bounds[0]] + [p[0] for p in previous]) <= max_span_us):

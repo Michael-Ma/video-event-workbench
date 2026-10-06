@@ -41,7 +41,7 @@ def test_hour_plan_covers_all_cores_without_silently_lowering_fps(kind):
     assert all(left.core_end_us == right.core_start_us for left, right in zip(windows, windows[1:]))
     for window in windows:
         assert math.ceil((window.read_end_us - window.read_start_us) * window.sample_fps / 1e6) + 1 <= 128
-        assert window.sample_fps == (12 if kind == "point" else 4)
+        assert window.sample_fps == (6 if kind == "point" else 2)
 
 
 def test_impossible_context_budget_is_explicit_error():
@@ -104,6 +104,21 @@ def test_candidate_grouping_does_not_transitively_swallow_chain():
     groups = group_candidates(proposals, 100)
     assert sorted(len(group) for group in groups) == [1, 2]
     assert sum(len(group) for group in groups) == 3
+
+
+def test_cross_window_overlap_is_verified_together_despite_local_identity_names():
+    proposals = [Candidate(candidate_id="a", window_id="left", entity_key="shooter",
+                           location=Location(kind="interval", start_us=33_500_000,
+                                             end_us=34_300_000)),
+                 Candidate(candidate_id="b", window_id="right", entity_key="player",
+                           location=Location(kind="interval", start_us=33_503_333,
+                                             end_us=34_303_333))]
+    groups = group_candidates(proposals, 10_000_000)
+    assert [[c.candidate_id for c in group] for group in groups] == [["a", "b"]]
+    # Association does not collapse observations or force a single final event.
+    assert proposals[0].entity_key != proposals[1].entity_key
+    proposals[1].window_id = "left"
+    assert len(group_candidates(proposals, 10_000_000)) == 2
 
 
 def test_exact_shared_evidence_duplicate_but_near_repetition_remains():
@@ -169,3 +184,23 @@ def test_uncertain_clip_uses_observed_context_not_false_event_bounds():
     event.result_bucket = "uncertain"
     assert clip_range(event, RunConfig(), 12_000_000, (1_000_000, 6_000_000)) == (1_000_000, 6_000_000)
     assert clip_range(event, RunConfig(), 12_000_000) is None
+
+
+def test_native_video_evidence_uses_local_timestamps_and_declared_sampling_floor():
+    from app.algorithms import model_evidence_refs
+
+    submitted = {"input_mode": "video", "media_id": "original", "sample_fps": 2,
+                 "input_origin_us": 10_020_000, "source_range_us": [10_020_000, 13_020_000],
+                 "frames": [{"source_time_us": 10_020_000}, {"source_time_us": 11_020_000}],
+                 "actual_sampling_known": False}
+    event = ModelEvent(kind="point", anchor_s=1, anchor_range_s=(1, 1), evidence_times_s=[1])
+    location = map_model_event(event, submitted, 20_000_000, "point")
+    assert location.anchor_us == 11_020_000
+    assert location.anchor_range_us == (10_520_000, 11_520_000)
+    assert model_evidence_refs(event, submitted) == ["video:original:11020000"]
+    assert event.evidence_frame_ids == []
+    for value in (-1, 3, float("nan")):
+        with pytest.raises(InvalidModelOutput):
+            model_evidence_refs(event.model_copy(update={"evidence_times_s": [value]}), submitted)
+    with pytest.raises(InvalidModelOutput):
+        model_evidence_refs(event.model_copy(update={"evidence_frame_ids": ["not-a-JPEG"]}), submitted)

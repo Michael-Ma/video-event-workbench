@@ -142,7 +142,8 @@ class Repository:
             if not row:
                 return None
             data = json.loads(row["data"])
-            data.update(status="running", stage="preparing", updated_at=now())
+            data.update(status="running", stage="preparing", updated_at=now(),
+                        started_at=data.get("started_at") or now())
             con.execute("UPDATE runs SET status='running',data=? WHERE id=?",
                         (json.dumps(data), row["id"]))
         return data

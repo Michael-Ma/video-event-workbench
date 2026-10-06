@@ -286,3 +286,26 @@ API 增加可见诊断：停在哪一步、失败或未提交的窗口、等待�
 未知请求结果、缺失 usage、没有已核实单价的模型或尚未覆盖的工具费用均记为费用未知，不能记成零。收到响应后即使 JSON 无效、输出截断或任务已取消，仍保存已有 usage 和费用。Fixture 是本地流程测试，明确记为零费用。
 
 84 项后端测试及代码检查通过，包含缓存扣费、thinking、价格生效日期、未知费用、响应复用、截断和取消后的保存。实际服务完成一次 Fixture 流程，5 次本地调用分别记录零费用，API 返回费用字段和日志。验证未新增付费 Gemini 请求；尚无本任务的多图或原生视频 latency 基准。
+
+## 图片和视频输入以及并行处理 2026 10 05
+
+propose 和 verify_refine 分别支持 images 或 video，UI 可独立选择两步输入方式并保留混合组合。最近运行显示输入组合，当前运行展示冻结配置。images 使用带 frame ID 与实际源时间的 JPEG；video 使用本地裁切、归零并保留源 PTS 映射的 MP4 窗口，不传音频。native video 的证据使用局部时间戳并换算成源时间引用，服务器侧采样不冒充已观察的 JPEG。
+
+默认 action scan 降为 2 FPS，point scan 为 6 FPS，refine 为 6 FPS，单次请求超时为 1200 秒。真实重测出现 MAX_TOKENS：约 7860 个 thinking tokens 挤占 8192 的输出预算，导致 JSON 截断。因此默认改为 thinking low、输出上限 16384、temperature 1，并在高级参数中允许调整。temperature 1 沿用 [Gemini 官方建议](https://ai.google.dev/gemini-api/docs/troubleshooting)；该建议不能证明此前失败由 temperature 引起。
+
+query 解析与媒体准备同时执行；独立 scan windows、refine groups 以及 clip exports 各自并行，默认 model 和 clip 并行数均为 2。提交意图与请求预算原子保存，整个 run 的模型请求上限由共享信号量约束。未知请求一出现即阻止新付费调用，已提交请求继续保存响应与费用；日志与进度快照按顺序写入。全局 grouping 和 occurrence 筛选仍遵守阶段依赖。
+
+跨窗口的 entity_key 可能被命名为 shooter 或 player，不能据此认为是不同的人。跨窗口时间重叠的 proposals 可一起 refine，保持 complete-link 与输入范围上限；所有 proposals 保留，模型仍可返回零个、一个或多个 event，不强制合并。测试中 33 秒附近的重复 event 已消除，并保留两个来源 candidate。rejected 或 unresolved disposition 如显式关联同判定的 event，兼容其关联并保留原 matching decision；矛盾的关联仍拒绝。图片测试的此类格式问题使用已保存响应重新解析，未增加模型调用，原始响应与旧结果快照保留。
+
+native video 局部片段曾因时长元信息少约 0.667 毫秒被误判失败。现在仅在明确的 MP4 movie timescale 支持该量化误差时接受；帧数、逐帧 PTS 与解码末帧仍校验到 2 微秒，源 origin 和范围不按毫秒取整。量化依据与误差写入 duration_validation。
+
+UI 展示每次调用的 input mode、latency、input/cached/output/thinking tokens、估算费用与价格版本，并单列已知小计、未知及在途数量。clip 的本地 attempt 不混入模型费用；取消后仍接收晚到费用。处理时间和排队时间分开显示。
+
+同一段 54.8 秒 IMG_0228.MOV 和原 query 的最终测试均完成。以下处理时间排除排队与人工排查等待，费用按已保存 Standard 价格估算：
+
+| 输入组合 | 处理时间 | 模型调用 | 自动判定 | 导出片段 | 估算 USD |
+| --- | --- | --- | --- | --- | --- |
+| images 到 images | 66.8 秒 | 9 | 5 matched 和 1 rejected | 5 | 0.335336 |
+| video 到 video | 47.7 秒 | 9 | 6 matched | 6 | 0.039614 |
+
+两者对最后一次投篮的位置条件判断不同，不能仅由数量确定准确率。总共 6 次真实试跑、57 次模型调用的已知标准价估算为 1.553354 美元，包含排查时的截断响应；这不是账户账单。116 项后端测试、33 项前端测试、前端构建与代码检查通过，覆盖四种输入组合、并行限额、原子预算、未知结果阻断、取消与费用保存、fractional FPS 时长量化及 mapping 兼容。实际页面验证了两个输入选择、真实费用明细、390 像素布局和可播放片段。

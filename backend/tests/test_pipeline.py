@@ -101,6 +101,24 @@ def test_empty_refine_response_does_not_reject_unmentioned_candidates():
     assert all(r.decision == "unresolved" and r.result_bucket == "uncertain" for r in results)
 
 
+@pytest.mark.parametrize("decision", ["rejected", "unresolved"])
+def test_consistent_negative_or_uncertain_mapping_preserves_the_matching_decision(decision):
+    response = ModelResponse.model_validate({
+        "events": [{"kind": "interval", "decision": decision, "start_s": 1, "end_s": 1.5,
+                    "start_range_s": [1, 1], "end_range_s": [1.5, 1.5],
+                    "evidence_frame_ids": ["f1"], "reason": "Visible matching decision"}],
+        "candidate_dispositions": [{"candidate_id": "c1", "disposition": decision,
+                                    "event_indices": [0]}],
+    })
+    output = refinement_results(response, candidates(), sample_manifest(), 10_000_000,
+                                QuerySpec(raw_query="all grabs"), RunConfig(provider="fixture"), "group")
+    assert output[0].source_candidate_ids == ["c1"]
+    assert output[0].decision == decision
+    assert output[0].result_bucket == ("rejected" if decision == "rejected" else "uncertain")
+    assert output[0].result_bucket != "matched"
+    assert response.candidate_dispositions[0].disposition == decision
+
+
 def test_zero_one_many_response_maps_each_input_or_keeps_it_unresolved():
     response = ModelResponse.model_validate({
         "events": [{"kind": "interval", "start_s": 1, "end_s": 1.5,

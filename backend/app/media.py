@@ -27,6 +27,8 @@ from .config import Settings
 Cancelled = Callable[[], bool] | None
 MICROSECOND = 1_000_000
 INDEX_VERSION = 1
+OUTPUT_MOVIE_TIMESCALE = 1000  # MP4 movie/edit-list duration ticks, not video frame PTS ticks.
+FRAME_MAPPING_TOLERANCE_US = 2
 
 
 class MediaError(RuntimeError):
@@ -146,8 +148,10 @@ def _build_frame_index(path: Path, media_id: str, cancelled: Cancelled = None) -
     origin = None
     last_duration = None
     stream_end = None
+    container_duration_us = None
     try:
         with av.open(str(path)) as container:
+            container_duration_us = container.duration
             stream = container.streams.video[0]
             if stream.duration is not None and stream.start_time is not None:
                 stream_end = (stream.start_time + stream.duration) * stream.time_base
@@ -177,10 +181,13 @@ def _build_frame_index(path: Path, media_id: str, cancelled: Cancelled = None) -
         estimated = False
         if stream_end is not None and stream_end > last_stamp:
             tail = stream_end - last_stamp
+            duration_basis = "stream_metadata_end"
         elif last_duration and last_duration > 0:
             tail = last_duration
+            duration_basis = "decoded_last_frame_duration"
         else:
             estimated = True
+            duration_basis = "estimated_last_frame_duration"
             deltas = [r["duration_us"] for r in records[:-1]]
             tail = Fraction(sorted(deltas)[len(deltas) // 2], MICROSECOND) if deltas else Fraction(1, 30)
         records[-1]["duration_us"] = max(1, _us(tail))
@@ -192,6 +199,15 @@ def _build_frame_index(path: Path, media_id: str, cancelled: Cancelled = None) -
             "source_origin_pts": records[0]["pts"],
             "source_time_base": records[0]["time_base"],
             "last_frame_duration_estimated": estimated,
+            "duration_basis": duration_basis,
+            "container_duration_us": container_duration_us,
+            "stream_duration_us": _us(stream_end - origin) if stream_end is not None else None,
+            # Keep this independent from the index's stream-metadata-based final end.
+            # MP4 edit lists can quantize stream duration while decoded frame PTS and
+            # packet/frame durations still preserve the fine-grained presentation span.
+            "decoded_display_duration_us": (
+                _us(last_stamp + last_duration - origin) if last_duration and last_duration > 0 else None
+            ),
         }
     except MediaError:
         raise
@@ -409,14 +425,16 @@ def sample_frames(media: dict, start_us: int, end_us: int, fps: float,
         "frames": frames, "input_origin_us": observed[0],
         "source_range_us": [start_us, end_us], "read_start_us": start_us, "read_end_us": end_us,
         "max_gap_us": max(b - a for a, b in pairwise(edges)),
-        "requested_fps": fps, "actual_sampling_known": True,
+        "requested_fps": fps, "sample_fps": fps, "input_mode": "images",
+        "actual_sampling_known": True,
         "sampling_policy": "first_source_frame_at_or_after_grid_time_unique",
         "input_duration_s": (end_us - observed[0]) / MICROSECOND,
     }
 
 
 def cut_clip(media: dict, start_us: int, end_us: int, output_path: Path,
-             settings: Settings, cancelled: Cancelled = None) -> dict:
+             settings: Settings, cancelled: Cancelled = None,
+             *, max_width: int | None = None) -> dict:
     _check_cancelled(cancelled)
     index = _index(media, settings)
     first, stop = _range(index, start_us, end_us)
@@ -435,6 +453,10 @@ def cut_clip(media: dict, start_us: int, end_us: int, output_path: Path,
     preceding_keys = [r for r in records[:first + 1] if r["key_frame"]]
     key = preceding_keys[-1] if preceding_keys else records[0]
     seek_seconds = float(key["pts"] * Fraction(key["time_base"]))
+    if max_width is not None and (not isinstance(max_width, int) or max_width < 2):
+        raise MediaError("invalid_sampling_config", "Video width limit must be at least two pixels")
+    scale = ("scale=w='trunc(iw/2)*2':h='trunc(ih/2)*2'" if max_width is None else
+             f"scale=w='trunc(min({max_width},iw)/2)*2':h=-2")
     destination = _under_root(output_path, settings)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.stem}.{uuid.uuid4().hex}.mp4")
@@ -448,10 +470,11 @@ def cut_clip(media: dict, start_us: int, end_us: int, output_path: Path,
             "-i", str(_source(media, settings)), "-map", "0:v:0", "-an", "-vf",
             (f"settb=expr={tb.numerator}/{tb.denominator},"
              f"trim=start_pts={begin['pts']}:end_pts={end_pts},setpts=PTS-STARTPTS,"
-             "scale=w='trunc(iw/2)*2':h='trunc(ih/2)*2',setsar=1"),
+             f"{scale},setsar=1"),
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
             "-fps_mode", "vfr", "-enc_time_base", "1:1000000",
             "-frames:v", str(len(selected)), "-video_track_timescale", "1000000",
+            "-movie_timescale", str(OUTPUT_MOVIE_TIMESCALE),
             "-movflags", "+faststart", str(temporary),
         ], cancelled)
         actual = _build_frame_index(temporary, str(media["id"]), cancelled)
@@ -460,7 +483,8 @@ def cut_clip(media: dict, start_us: int, end_us: int, output_path: Path,
                 "expected_frame_count": len(selected), "output_frame_count": actual["frame_count"],
             })
         expected_times = [r["source_time_us"] - begin["source_time_us"] for r in selected]
-        if any(abs(e - r["source_time_us"]) > 2 for e, r in zip(expected_times, actual["frames"])):
+        if any(abs(e - r["source_time_us"]) > FRAME_MAPPING_TOLERANCE_US
+               for e, r in zip(expected_times, actual["frames"])):
             raise MediaError("clip_timestamp_mismatch", "Encoded clip changed source frame timing")
         _check_cancelled(cancelled)
         os.replace(temporary, destination)
@@ -471,11 +495,149 @@ def cut_clip(media: dict, start_us: int, end_us: int, output_path: Path,
             "source_first_frame": {k: begin[k] for k in ("frame_id", "frame_index", "pts", "time_base", "source_time_us")},
             "source_last_frame": {k: last[k] for k in ("frame_id", "frame_index", "pts", "time_base", "source_time_us", "source_end_us")},
             "frame_count": len(selected), "output_duration_us": actual["duration_us"],
+            "output_origin_pts": actual["source_origin_pts"],
+            "output_time_base": actual["source_time_base"],
+            "output_duration_basis": actual["duration_basis"],
+            "output_decoded_display_duration_us": actual["decoded_display_duration_us"],
+            "output_stream_duration_us": actual["stream_duration_us"],
+            "output_container_duration_us": actual["container_duration_us"],
+            "output_movie_timescale": OUTPUT_MOVIE_TIMESCALE,
+            "output_duration_quantum_us": MICROSECOND // OUTPUT_MOVIE_TIMESCALE,
             "encoding": "h264/yuv420p; decoded-and-reencoded; variable-frame-timing",
             "audio_included": False, "frame_selection": "presentation_start_in_half_open_range",
         }
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _validate_native_duration(clipped: dict, source_duration_us: int) -> dict:
+    """Allow proven MP4 duration quantization, never a changed frame timeline.
+
+cut_clip has already verified every frame PTS and count. In addition, where the
+decoder exposes the final display duration, it must agree with the source span
+within the same two-microsecond rounding tolerance. Only then can millisecond-
+aligned stream metadata differ by one explicitly configured movie-timescale tick.
+"""
+    reported = clipped["output_duration_us"]
+    decoded = clipped.get("output_decoded_display_duration_us")
+    reported_error = reported - source_duration_us
+    decoded_error = decoded - source_duration_us if decoded is not None else None
+    quantum = clipped.get("output_duration_quantum_us")
+    known_movie_quantum = (clipped.get("output_movie_timescale") == OUTPUT_MOVIE_TIMESCALE
+                          and quantum == MICROSECOND // OUTPUT_MOVIE_TIMESCALE)
+    quantized = (
+        abs(reported_error) > FRAME_MAPPING_TOLERANCE_US
+        and known_movie_quantum
+        and clipped.get("output_duration_basis") == "stream_metadata_end"
+        and reported % quantum == 0
+        and decoded_error is not None
+        and abs(decoded_error) <= FRAME_MAPPING_TOLERANCE_US
+        and abs(reported_error) <= quantum + FRAME_MAPPING_TOLERANCE_US
+    )
+    validation = {
+        "source_display_duration_us": source_duration_us,
+        "reported_duration_us": reported,
+        "reported_duration_basis": clipped.get("output_duration_basis"),
+        "decoded_display_duration_us": decoded,
+        "container_duration_us": clipped.get("output_container_duration_us"),
+        "stream_duration_us": clipped.get("output_stream_duration_us"),
+        "reported_minus_source_us": reported_error,
+        "decoded_minus_source_us": decoded_error,
+        "frame_timing_tolerance_us": FRAME_MAPPING_TOLERANCE_US,
+        "container_duration_quantum_us": quantum if known_movie_quantum else None,
+        "accepted_container_quantization": bool(quantized),
+    }
+    if ((decoded_error is not None and abs(decoded_error) > FRAME_MAPPING_TOLERANCE_US)
+            or (abs(reported_error) > FRAME_MAPPING_TOLERANCE_US and not quantized)):
+        raise MediaError("video_duration_mismatch", "Encoded model input changed source display duration", validation)
+    return validation
+
+
+def prepare_video_input(media: dict, start_us: int, end_us: int, fps: float,
+                        max_frames: int, output_dir: Path, settings: Settings,
+                        max_width: int = 768, cancelled: Cancelled = None) -> dict:
+    """Encode only this input window, retaining source VFR timing and clip-local zero.
+
+`frames` is a NOMINAL local index for diagnostics/fixture mode, not a claim that
+the provider sampled those frames. Video evidence must use clip-local timestamps.
+The full original-to-clip frame mapping is persisted separately without JPEGs.
+"""
+    _check_cancelled(cancelled)
+    if not math.isfinite(fps) or fps <= 0 or fps > 24 or max_frames < 1 or max_width < 2:
+        raise MediaError("invalid_sampling_config", "Native video sampling requires FPS in (0, 24]")
+    index = _index(media, settings)
+    first, stop = _range(index, start_us, end_us)
+    selected = index["frames"][first:stop]
+    if not selected:
+        raise MediaError("no_observed_frames", "No original frame starts inside this input window")
+    origin = selected[0]["source_time_us"]
+    actual_end = selected[-1]["source_end_us"]
+    duration = actual_end - origin
+    nominal_count = math.ceil(Fraction(duration, MICROSECOND) * Fraction(str(fps)))
+    if nominal_count > max_frames:
+        raise MediaError("sampling_limit_exceeded", "Native video FPS exceeds the nominal frame budget; split the window", {
+            "max_frames": max_frames, "requested_fps": fps,
+            "minimum_required_frames": nominal_count,
+        })
+    directory = _under_root(output_dir, settings)
+    directory.mkdir(parents=True, exist_ok=True)
+    # The caller's attempt directory plus a unique filename prevents stale publication.
+    token = uuid.uuid4().hex
+    video_path = directory / f"input_{token}.mp4"
+    mapping_path = directory / f"input_{token}_mapping.json"
+    try:
+        clipped = cut_clip(media, start_us, end_us, video_path, settings,
+                           cancelled=cancelled, max_width=max_width)
+        if clipped["output_origin_pts"] != 0:
+            raise MediaError("video_origin_mismatch", "Encoded model input does not start at timestamp zero")
+        duration_validation = _validate_native_duration(clipped, duration)
+        frame_mapping = [{
+            **record, "local_time_s": (record["source_time_us"] - origin) / MICROSECOND,
+        } for record in selected]
+        _write_json(mapping_path, {
+            "input_origin_us": origin, "requested_range_us": [start_us, end_us],
+            "actual_range_us": clipped["actual_range_us"],
+            "frames": frame_mapping, "mapping_precision_us": FRAME_MAPPING_TOLERANCE_US,
+            "duration_validation": duration_validation,
+        })
+        # This index estimates which source frames a sampling grid could observe. It
+        # remains local; native decoding/sampling inside the provider is not exposed.
+        times = [record["source_time_us"] for record in selected]
+        nominal = []
+        tick, step = Fraction(origin), Fraction(MICROSECOND) / Fraction(str(fps))
+        while tick < actual_end:
+            position = bisect.bisect_left(times, tick)
+            if position < len(selected) and (not nominal or nominal[-1] != position):
+                nominal.append(position)
+            tick += step
+        gaps = [b - a for a, b in pairwise([*times, actual_end])]
+        _check_cancelled(cancelled)
+        return {
+            "input_mode": "video", "input_origin_us": origin,
+            "source_range_us": clipped["actual_range_us"],
+            "requested_range_us": [start_us, end_us],
+            "read_start_us": start_us, "read_end_us": end_us,
+            "input_duration_s": duration / MICROSECOND,
+            "requested_fps": fps, "sample_fps": fps,
+            "nominal_frame_count": nominal_count,
+            "frames": [frame_mapping[position] for position in nominal],
+            "max_gap_us": max(math.ceil(step), max(gaps)),
+            "actual_sampling_known": False,
+            "frame_manifest_role": "nominal_source_index_not_provider_observation",
+            "sampling_policy": "provider_native_video_requested_fps",
+            "video": {
+                "path": str(video_path.resolve()), "mime_type": "video/mp4",
+                "duration_us": duration, "size_bytes": video_path.stat().st_size,
+                "actual_range_us": clipped["actual_range_us"],
+                "frame_mapping_path": str(mapping_path.resolve()),
+                "source_frame_count": len(selected), "audio_included": False,
+                "duration_validation": duration_validation,
+            },
+        }
+    except BaseException:
+        video_path.unlink(missing_ok=True)
+        mapping_path.unlink(missing_ok=True)
+        raise
 
 
 _FONT = {

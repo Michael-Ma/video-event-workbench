@@ -71,3 +71,27 @@ def estimate_call_cost(snapshot: dict, usage: dict, *, outcome_unknown: bool = F
         "token_counts": {**counts, "uncached_input_tokens": uncached,
                          "billable_output_tokens": generated},
     }
+
+
+def summarize_call_costs(tasks: list[dict]) -> dict:
+    """Sum known estimates only, keeping unsubmitted tasks out of request counts."""
+    calls = [task for task in tasks if task.get("request_intent")]
+    subtotal = Decimal(0)
+    estimated, unknown, pending, local = 0, 0, 0, 0
+    for task in calls:
+        cost = task.get("cost") or {}
+        if cost.get("status") == "estimated" and cost.get("estimated_usd") is not None:
+            subtotal += Decimal(str(cost["estimated_usd"]))
+            estimated += 1
+        elif cost.get("status") == "not_billable":
+            local += 1
+        elif not cost and task.get("status") == "submitting":
+            pending += 1
+        else:
+            unknown += 1
+    return {
+        "currency": "USD", "basis": "paid_standard_list_estimate",
+        "estimated_usd": float(subtotal) if estimated or local else None,
+        "estimated_calls": estimated, "unknown_calls": unknown, "pending_calls": pending,
+        "local_calls": local, "total_calls": len(calls), "complete": not unknown and not pending,
+    }
