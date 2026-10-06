@@ -310,20 +310,14 @@ UI 展示每次调用的 input mode、latency、input/cached/output/thinking tok
 
 两者对最后一次投篮的位置条件判断不同，不能仅由数量确定准确率。总共 6 次真实试跑、57 次模型调用的已知标准价估算为 1.553354 美元，包含排查时的截断响应；这不是账户账单。116 项后端测试、33 项前端测试、前端构建与代码检查通过，覆盖四种输入组合、并行限额、原子预算、未知结果阻断、取消与费用保存、fractional FPS 时长量化及 mapping 兼容。实际页面验证了两个输入选择、真实费用明细、390 像素布局和可播放片段。
 
+## 中英文界面和公开仓库 2026 10 06
 
-## English and Chinese interface on 2026-10-06
+README 全文改为英文，保留安装步骤、工作流、架构、配置、费用与验证边界。页面顶部可选择 English 或中文，首次按浏览器语言选择，后续记住用户偏好。上传与配置、输入组合、处理进度、费用明细、结果筛选及已知系统错误均支持切换。
 
-The header language selector supports English and Chinese, follows the browser language
-on first use, and remembers the choice. It translates system labels, run status, configuration,
-costs, filters, and known errors without rewriting draft queries, event selection, user
-filenames, model judgments, or raw logs. Query templates use the chosen language only when clicked.
+语言切换只改变系统界面的显示。当前查询、已选视频、输入配置、结果筛选、选中事件与费用记录保持不变；用户文件名、模型判断原文、技术详情、原始日志和 JSON 文件保留原始内容。查询模板仅在用户点击时使用当前语言生成。切换语言不会新建运行或模型调用。
 
-Each API request carries Accept-Language. Supported variants and quality weights choose
-read-time diagnostic and error copy; API defaults remain Chinese. Content-Language and
-Vary describe the returned language. Stable error codes and structured parameters let
-existing errors change language while preserving technical details.
+前端每次 API 请求携带 Accept-Language，后端按受支持的中英文变体及 q 权重生成已知错误与运行诊断的译文，并返回 Content-Language 和 Vary。未指定受支持语言时保留中文 API 行为。诊断在读取时翻译，不修改持久化结果。已有 API 错误通过稳定 code 重新显示当前语言，上传大小等结构化参数保持完整；未知外部错误保留原文。
 
-Validation passed 142 backend tests, 56 frontend tests, Ruff, and TypeScript/Vite build.
-The actual desktop and 390-pixel UI confirmed language changes, saved preference after
-reload, unchanged queries, selection and costs, and no horizontal page overflow.
-No Gemini calls were made for this localization change.
+[Video Event Workbench 代码仓库](https://github.com/Michael-Ma/video-event-workbench)已设为 Public，并验证可以匿名访问[英文 README](https://github.com/Michael-Ma/video-event-workbench/blob/main/README.md)。公开内容为代码和已跟踪文档；本地 .env、上传视频、运行数据、依赖和构建目录保持在 Git 之外。
+
+本次验证通过 142 项后端测试、56 项前端测试、Ruff 和 TypeScript/Vite 构建，[GitHub 自动检查](https://github.com/Michael-Ma/video-event-workbench/actions/runs/37434585348)也全部通过。实际桌面界面验证了两种语言、查询与事件选择保留、费用不变及刷新后的语言记忆；390 像素宽度下页面无横向溢出，语言控件高度为 44 像素。历史运行的中英文 API 响应保留相同的 query、results、tasks、cost_summary、error 和时间戳，仅系统诊断文案不同。本次本地化验证未调用 Gemini。
