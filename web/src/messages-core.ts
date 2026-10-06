@@ -1,0 +1,20 @@
+import { registerMessages } from './i18n';
+registerMessages({
+  '排队中':'Queued', '待处理':'Pending', '处理中':'Processing', '处理完成':'Completed',
+  '部分完成':'Partially completed', '处理失败':'Failed', '已取消':'Cancelled', '已完成':'Completed',
+  '未执行':'Not executed', '已跳过':'Skipped', '请求结果未知':'Request outcome unknown',
+  '等待模型响应':'Awaiting model response', '等待执行':'Waiting to run', '准备视频':'Preparing video',
+  '解析查询':'Parsing query', '规划窗口':'Planning windows', '全片扫描':'Scanning video',
+  '整理候选':'Grouping candidates', '核实与精定位':'Verifying and refining', '整理事件':'Reconciling events',
+  '截取片段':'Exporting clips', '发布结果':'Publishing results', '已结束':'Finished',
+  '失败':'Failed', '已停止':'Stopped', '恢复任务':'Recovering run', '未知':'Unknown', '未知错误':'Unknown error',
+  '请在本地 .env 中配置 GEMINI_API_KEY，然后重启服务。':'Configure GEMINI_API_KEY in the local .env file, then restart the services.',
+  '流程测试模式只支持内置示例视频。':'Fixture mode supports only the built-in demo video.',
+  '视频尚未准备好。':'The video is not ready.', '请输入要定位的事件。':'Enter the event you want to locate.',
+  '请求参数无效。':'The request parameters are invalid.', '记录不存在。':'The record does not exist.',
+  '上传的视频为空。':'The uploaded video is empty.', '视频没有可用时长。':'The video has no usable duration.',
+  '无效的请求标识。':'The request identifier is invalid.',
+  '同一请求标识已用于不同参数。':'The same request identifier was used with different parameters.',
+  '该任务还没有结果。':'This run has no results yet.', '无效的文件路径。':'The file path is invalid.',
+  'API 没有返回有效 JSON，请检查后端服务是否已启动。':'The API returned invalid JSON. Check that the backend is running.',
+});

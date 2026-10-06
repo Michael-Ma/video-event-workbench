@@ -8,16 +8,18 @@ from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote
 
-from fastapi import FastAPI, File, Header, Query, Request, UploadFile
+from fastapi import FastAPI, File, Header, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .billing import summarize_call_costs
 from .config import Settings
 from .contracts import CreateRunRequest
 from .db import Repository, new_id
 from .diagnostics import run_diagnostics
+from .localization import api_message, language_from_header
 from .media import MediaError, generate_demo, probe_video
 
 
@@ -64,27 +66,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.repo = repo
 
     @app.exception_handler(APIError)
-    async def api_error(_request: Request, exc: APIError):
-        error = {"code": exc.code, "message": exc.message}
+    async def api_error(request: Request, exc: APIError):
+        language = language_from_header(request.headers.get("accept-language"))
+        message = api_message(exc.code, exc.message, language,
+                              parameters={"max_upload_mb": settings.max_upload_mb})
+        error = {"code": exc.code, "message": message}
+        if message != exc.message:
+            error["technical_message"] = exc.message
         if exc.details is not None:
             error["details"] = exc.details
-        return JSONResponse({"error": error}, status_code=exc.status)
+        return JSONResponse({"error": error}, status_code=exc.status,
+                            headers={"Content-Language": language, "Vary": "Accept-Language"})
 
     @app.exception_handler(RequestValidationError)
-    async def validation_error(_request: Request, exc: RequestValidationError):
-        return JSONResponse({"error": {"code": "invalid_request", "message": "请求参数无效。",
+    async def validation_error(request: Request, exc: RequestValidationError):
+        language = language_from_header(request.headers.get("accept-language"))
+        return JSONResponse({"error": {"code": "invalid_request",
+                                      "message": api_message("invalid_request", "请求参数无效。", language),
                                       "details": json.loads(json.dumps(exc.errors(), default=str))}},
-                            status_code=422)
+                            status_code=422,
+                            headers={"Content-Language": language, "Vary": "Accept-Language"})
 
     @app.exception_handler(KeyError)
-    async def missing_record(_request: Request, _exc: KeyError):
-        return JSONResponse({"error": {"code": "not_found", "message": "记录不存在。"}},
-                            status_code=404)
+    async def missing_record(request: Request, _exc: KeyError):
+        language = language_from_header(request.headers.get("accept-language"))
+        return JSONResponse({"error": {"code": "not_found",
+                                      "message": api_message("not_found", "记录不存在。", language)}},
+                            status_code=404,
+                            headers={"Content-Language": language, "Vary": "Accept-Language"})
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException):
+        language = language_from_header(request.headers.get("accept-language"))
+        code = {404: "not_found", 405: "method_not_allowed"}.get(exc.status_code, "http_error")
+        error = {"code": code, "message": api_message(code, str(exc.detail), language)}
+        if code == "http_error" and not isinstance(exc.detail, str):
+            error["details"] = exc.detail
+        return JSONResponse({"error": error}, status_code=exc.status_code,
+                            headers={**(exc.headers or {}), "Content-Language": language,
+                                     "Vary": "Accept-Language"})
 
     @app.exception_handler(MediaError)
-    async def media_error(_request: Request, exc: MediaError):
-        return JSONResponse({"error": {"code": exc.code, "message": str(exc),
-                                      "details": getattr(exc, "details", {})}}, status_code=422)
+    async def media_error(request: Request, exc: MediaError):
+        language = language_from_header(request.headers.get("accept-language"))
+        original = str(exc)
+        message = api_message(exc.code, original, language)
+        error = {"code": exc.code, "message": message, "details": getattr(exc, "details", {})}
+        if message != original:
+            error["technical_message"] = original
+        return JSONResponse({"error": error}, status_code=422,
+                            headers={"Content-Language": language, "Vary": "Accept-Language"})
 
     @app.get("/api/health")
     def health():
@@ -125,7 +156,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 while chunk := await file.read(1024 * 1024):
                     size += len(chunk)
                     if size > settings.max_upload_mb * 1024 * 1024:
-                        raise APIError("upload_too_large", f"视频超过 {settings.max_upload_mb} MB 限制。", 413)
+                        raise APIError("upload_too_large", f"视频超过 {settings.max_upload_mb} MB 限制。", 413,
+                                       {"max_upload_mb": settings.max_upload_mb})
                     out.write(chunk)
             if not size:
                 raise APIError("empty_upload", "上传的视频为空。", 422)
@@ -198,10 +230,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return [public_run(run) for run in repo.list_runs(limit)]
 
     @app.get("/api/runs/{run_id}")
-    def get_run(run_id: str):
+    def get_run(run_id: str, request: Request, response: Response):
         run = repo.get_run(run_id)
         tasks = repo.list_tasks(run_id)
-        return {**public_run(run), "tasks": tasks, "diagnostics": run_diagnostics(run, tasks),
+        language = language_from_header(request.headers.get("accept-language"))
+        response.headers["Content-Language"] = language
+        response.headers["Vary"] = "Accept-Language"
+        return {**public_run(run), "tasks": tasks, "diagnostics": run_diagnostics(run, tasks, language),
                 "cost_summary": summarize_call_costs(tasks)}
 
     @app.get("/api/runs/{run_id}/logs")

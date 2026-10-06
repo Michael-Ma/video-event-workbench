@@ -3,18 +3,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-ERROR_COPY = {
-    "request_timeout": ("模型请求超时", "等待模型响应超时，后续模型请求已暂停。", "可延长请求超时或缩小窗口后手动新建运行。原请求未自动重试。"),
-    "request_unknown": ("模型请求结果未知", "没有收到明确的模型响应，后续模型请求已暂停。", "先检查请求记录。重新运行会创建新的模型调用。"),
-    "blocked_by_unknown_request": ("窗口未执行", "前一个模型请求的结果未知，因此此窗口没有提交。", "等待问题确认后再手动新建运行。"),
-    "call_budget": ("达到模型调用上限", "本次运行已用完配置的模型调用次数。", "可提高调用上限后手动新建运行。"),
-    "invalid_response": ("模型返回格式不完整", "模型响应被截断或不符合输出约定。", "检查响应记录，尝试缩小窗口或调整输出上限。"),
-    "incomplete_response": ("模型输出未覆盖整个窗口", "窗口拆分后仍未获得完整输出。", "可缩小负责窗口后新建运行。"),
-    "invalid_event": ("事件时间或证据无效", "返回的事件时间或证据无法对应本次送入的帧。", "检查原始响应与送入帧。"),
-    "refinement_failed": ("事件核实失败", "局部核实没有完成；已有候选会保留为不确定项。", "查看对应候选和响应记录。"),
-    "clip_failed": ("片段截取失败", "事件定位记录保留，但这个片段尚未成功生成。", "查看裁片任务的具体错误。"),
-    "provider_http_error": ("模型服务返回错误", "模型 API 返回了错误状态。", "检查状态码及模型配置。"),
-}
+from .localization import DIAGNOSTIC_COPY, diagnostic_copy
+
+# Preserve the historical Chinese constant for callers; responses use read-time language.
+ERROR_COPY = {code: copy[0] for code, copy in DIAGNOSTIC_COPY.items()}
 
 
 def elapsed_s(task: dict) -> float | None:
@@ -31,7 +23,7 @@ def elapsed_s(task: dict) -> float | None:
         return None
 
 
-def run_diagnostics(run: dict, tasks: list[dict]) -> dict:
+def run_diagnostics(run: dict, tasks: list[dict], language: str = "zh") -> dict:
     unresolved = [t for t in tasks if (t.get("status") == "request_unknown" or (t.get("status") == "submitting" and run["status"] in ("partial", "failed", "cancelled")))
                   and t.get("request_intent")]
     issues, seen = [], set()
@@ -45,7 +37,7 @@ def run_diagnostics(run: dict, tasks: list[dict]) -> dict:
             code == "request_unknown" and not task.get("request_intent") and bool(unresolved))
         if blocked:
             code = "blocked_by_unknown_request"
-        title, message, action = ERROR_COPY.get(code, ("任务未完成", task.get("error") or "此步骤没有完成。", "查看任务记录了解具体原因。"))
+        title, message, action = diagnostic_copy(code, language)
         details = dict(task.get("error_details") or {})
         duration = elapsed_s(task) if not blocked else None
         if duration is not None:
@@ -72,7 +64,7 @@ def run_diagnostics(run: dict, tasks: list[dict]) -> dict:
     error = run.get("error")
     if isinstance(error, dict) and not any(i["code"] == error.get("code") for i in issues):
         code = error.get("code", "pipeline_failed")
-        title, message, action = ERROR_COPY.get(code, ("运行未完成", error.get("message", "运行发生错误。"), "检查处理记录。"))
+        title, message, action = diagnostic_copy(code, language, scope="run")
         issues.append({"task_id": None, "stage": run.get("last_stage") or run["stage"], "code": code,
                        "title": title, "message": message, "action": action, "technical_message": error.get("message"),
                        "details": error.get("details") or {}, "range_us": None, "artifact_refs": [], "not_submitted": False})
@@ -83,10 +75,11 @@ def run_diagnostics(run: dict, tasks: list[dict]) -> dict:
         if task_id and any(task_id in t["task_id"] and t["task_id"] in seen for t in tasks):
             continue
         code = error.get("code", "task_failed")
-        title, message, action = ERROR_COPY.get(code, ("任务未完成", error.get("message", "此步骤没有完成。"), "查看处理记录。"))
+        title, message, action = diagnostic_copy(code, language)
         issues.append({"task_id": task_id, "stage": error.get("stage", "scan"), "code": code,
                        "title": title, "message": message, "action": action, "technical_message": error.get("message"),
-                       "details": {}, "range_us": None, "artifact_refs": [], "not_submitted": False})
+                       "details": dict(error.get("details") or {}), "range_us": None,
+                       "artifact_refs": [], "not_submitted": False})
     # A blocked legacy task may retain request_unknown in the result envelope.
     unique = {}
     for issue in issues:

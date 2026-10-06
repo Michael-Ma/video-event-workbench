@@ -1,3 +1,6 @@
+import { appMessage } from './messages-app';
+import { localeTag, t, useI18n } from './i18n';
+import type { Language } from './i18n';
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { api, jsonRequest } from './api';
@@ -14,6 +17,11 @@ const templates = [
   { title: '小球触地', profile: 'point' as Profile, query: defaultQuery },
   { title: '机械臂抓取', profile: 'action' as Profile, query: '找出机械臂每次抓取物体的完整尝试，从针对目标的最后接近动作开始，到抓持结果可判断或尝试终止。保留失败尝试，排除等待和空闲移动。' },
 ];
+
+type UiError = string | { message: string; cause: unknown };
+function displayUiError(error: UiError): string {
+  return typeof error === 'string' ? t(error) : appMessage(error.message, { error: errorText(error.cause) });
+}
 
 function Icon({ name, size = 18 }: { name: 'film' | 'upload' | 'play' | 'download' | 'arrow' | 'check' | 'alert' | 'code' | 'stop'; size?: number }) {
   const paths: Record<string, ReactNode> = {
@@ -48,8 +56,8 @@ function CoveragePanel({ run, media }: { run: Run; media?: Media }) {
   const successful = tasks.filter(task => task.status === 'succeeded').length;
   const rangeTasks = tasks.filter(task => taskRange(task) !== null);
   return <section className="coverage-panel" aria-labelledby="coverage-title">
-    <div className="section-line"><h3 id="coverage-title">全片扫描覆盖</h3><span className="muted small">{coverage ? `${formatTime(coverage.covered_us)} / ${formatTime(duration)}` : `${successful} / ${tasks.length} 个扫描任务完成`}</span></div>
-    <div className="timeline" role="img" aria-label={complete ? '所有负责区间已完成扫描；这不等于找全全部事件。' : `扫描覆盖，${gaps.length} 段已知缺口。具体窗口状态见下方。`}>
+    <div className="section-line"><h3 id="coverage-title">{t("全片扫描覆盖")}</h3><span className="muted small">{coverage ? `${formatTime(coverage.covered_us)} / ${formatTime(duration)}` : appMessage('{completed} / {total} 个扫描任务完成', { completed: successful, total: tasks.length })}</span></div>
+    <div className="timeline" role="img" aria-label={complete ? t("所有负责区间已完成扫描；这不等于找全全部事件。") : appMessage('扫描覆盖，{count} 段已知缺口。具体窗口状态见下方。', { count: gaps.length })}>
       {duration > 0 && rangeTasks.map(task => {
         const range = taskRange(task)!;
         const left = Math.max(0, Math.min(100, range[0] / duration * 100));
@@ -59,9 +67,9 @@ function CoveragePanel({ run, media }: { run: Run; media?: Media }) {
       {duration > 0 && gaps.map((range, i) => <span key={`gap-${i}`} className="timeline-gap" style={{ left: `${range[0] / duration * 100}%`, width: `${(range[1] - range[0]) / duration * 100}%` }} />)}
     </div>
     <div className="timeline-scale"><span>00:00</span><span>{formatTime(duration)}</span></div>
-    <div className="coverage-footer"><div className="legend"><span><i className="legend-complete" />已扫描</span><span><i className="legend-active" />处理中</span><span><i className="legend-pending" />未完成</span><span><i className="legend-failed" />失败 / 缺口</span></div><span className="muted small">扫描完成 ≠ 全部事件已找出</span></div>
-    {gaps.length > 0 && <div className="inline-warning"><Icon name="alert" size={15} /><span>未完成扫描的原视频范围：{gaps.map(range => rangeLabel(range, false)).join('、')}</span></div>}
-    {tasks.length > 0 && <details className="window-details"><summary>查看 {tasks.length} 个窗口任务</summary><div className="task-table"><table><thead><tr><th>窗口</th><th>负责范围 · 原视频</th><th>状态</th></tr></thead><tbody>{tasks.map(task => <tr key={task.task_id}><td className="mono">{task.task_id}</td><td className="mono">{rangeLabel(taskRange(task))}</td><td><Badge status={task.status} /></td></tr>)}</tbody></table></div></details>}
+    <div className="coverage-footer"><div className="legend"><span><i className="legend-complete" />{t("已扫描")}</span><span><i className="legend-active" />{t("处理中")}</span><span><i className="legend-pending" />{t("未完成")}</span><span><i className="legend-failed" />{t("失败 / 缺口")}</span></div><span className="muted small">{t("扫描完成 ≠ 全部事件已找出")}</span></div>
+    {gaps.length > 0 && <div className="inline-warning"><Icon name="alert" size={15} /><span>{t("未完成扫描的原视频范围：")}{gaps.map(range => rangeLabel(range, false)).join(localeTag() === 'en-US' ? ', ' : '、')}</span></div>}
+    {tasks.length > 0 && <details className="window-details"><summary>{appMessage('查看 {count} 个窗口任务', { count: tasks.length })}</summary><div className="task-table"><table><thead><tr><th>{t("窗口")}</th><th>{t("负责范围 · 原视频")}</th><th>{t("状态")}</th></tr></thead><tbody>{tasks.map(task => <tr key={task.task_id}><td className="mono">{task.task_id}</td><td className="mono">{rangeLabel(taskRange(task))}</td><td><Badge status={task.status} /></td></tr>)}</tbody></table></div></details>}
   </section>;
 }
 
@@ -71,28 +79,28 @@ function EventDetails({ event, seekSource }: { event: EventResult; seekSource: (
   const [videoError, setVideoError] = useState(false);
   useEffect(() => setVideoError(false), [event.event_id, clipUrl]);
   return <div className="event-detail">
-    <div className="detail-title"><div><span className="eyebrow">选中事件</span><h3>{event.location.kind === 'point' ? '事件时刻' : '动作区间'} <span className="mono">{locationLabel(event.location)}</span></h3></div><Badge status={event.result_bucket}>{bucketNames[event.result_bucket]}</Badge></div>
-    {event.clip?.kind === 'context_fallback' && <div className="inline-warning"><Icon name="alert" size={16} /><span>此片段是上下文预览，事件的完整边界尚未确定。</span></div>}
-    {clipUrl ? <video className="clip-player" key={clipUrl} controls preload="metadata" src={clipUrl} onError={() => setVideoError(true)} aria-label="选中事件的截取片段" /> : <div className="clip-placeholder"><Icon name="film" size={30} /><p>{event.clip_status === 'failed' ? '片段截取失败，识别记录仍保留' : event.result_bucket === 'rejected' ? '已排除的候选不生成片段' : event.clip_status === 'pending' ? '片段尚未生成' : '此事件没有可播放片段'}</p></div>}
-    {videoError && <p className="error-text" role="alert">浏览器无法播放此片段。可下载文件，或在下方处理记录中检查产物。</p>}
-    {event.clip?.metadata.audio_included === false && <p className="field-help">此片段仅含视频，原始上传保留音轨。</p>}
-    <div className="clip-actions">{clipUrl && <a className="button button-secondary" href={clipUrl} download><Icon name="download" size={16} />下载片段</a>}{start !== undefined && <button className="button button-ghost" type="button" onClick={() => seekSource(start)}>在原视频定位 <Icon name="arrow" size={15} /></button>}</div>
+    <div className="detail-title"><div><span className="eyebrow">{t("选中事件")}</span><h3>{event.location.kind === 'point' ? t("事件时刻") : t("动作区间")} <span className="mono">{locationLabel(event.location)}</span></h3></div><Badge status={event.result_bucket}>{t(bucketNames[event.result_bucket])}</Badge></div>
+    {event.clip?.kind === 'context_fallback' && <div className="inline-warning"><Icon name="alert" size={16} /><span>{t("此片段是上下文预览，事件的完整边界尚未确定。")}</span></div>}
+    {clipUrl ? <video className="clip-player" key={clipUrl} controls preload="metadata" src={clipUrl} onError={() => setVideoError(true)} aria-label={t("选中事件的截取片段")} /> : <div className="clip-placeholder"><Icon name="film" size={30} /><p>{event.clip_status === 'failed' ? t("片段截取失败，识别记录仍保留") : event.result_bucket === 'rejected' ? t("已排除的候选不生成片段") : event.clip_status === 'pending' ? t("片段尚未生成") : t("此事件没有可播放片段")}</p></div>}
+    {videoError && <p className="error-text" role="alert">{t("浏览器无法播放此片段。可下载文件，或在下方处理记录中检查产物。")}</p>}
+    {event.clip?.metadata.audio_included === false && <p className="field-help">{t("此片段仅含视频，原始上传保留音轨。")}</p>}
+    <div className="clip-actions">{clipUrl && <a className="button button-secondary" href={clipUrl} download><Icon name="download" size={16} />{t("下载片段")}</a>}{start !== undefined && <button className="button button-ghost" type="button" onClick={() => seekSource(start)}>{t("在原视频定位 ")}<Icon name="arrow" size={15} /></button>}</div>
     {event.reason && <p className="event-reason">{event.reason}</p>}
-    {event.uncertainty_reasons.length > 0 && <div className="uncertainty"><strong>尚不确定</strong><ul>{event.uncertainty_reasons.map((reason, i) => <li key={i}>{reason}</li>)}</ul></div>}
-    <dl className="metadata-grid"><div><dt>模型判定</dt><dd>{{ supported: '有匹配证据', rejected: '排除', unresolved: '尚未解决' }[event.decision]}</dd></div><div><dt>边界状态</dt><dd>{{ bounded: '已定位有限范围', open: '边界开放', unknown: '边界未知' }[event.boundary_status]}</dd></div>
-      {event.location.kind === 'point' ? <div className="wide"><dt>事件可能发生范围 · 原视频</dt><dd className="mono">{rangeLabel(event.location.anchor_range_us)}</dd></div> : <><div><dt>开始不确定范围</dt><dd className="mono">{rangeLabel(event.location.start_range_us)}</dd></div><div><dt>结束不确定范围</dt><dd className="mono">{rangeLabel(event.location.end_range_us)}</dd></div></>}
-      {event.clip && <><div className="wide"><dt>请求裁剪范围 · 原视频</dt><dd className="mono">{rangeLabel(event.clip.cut_range_us)}</dd></div><div className="wide"><dt>实际裁剪范围 · 原视频</dt><dd className="mono">{event.clip.actual_range_us ? rangeLabel(event.clip.actual_range_us) : '后端未提供'}</dd></div></>}
+    {event.uncertainty_reasons.length > 0 && <div className="uncertainty"><strong>{t("尚不确定")}</strong><ul>{event.uncertainty_reasons.map((reason, i) => <li key={i}>{reason}</li>)}</ul></div>}
+    <dl className="metadata-grid"><div><dt>{t("模型判定")}</dt><dd>{{ supported: t("有匹配证据"), rejected: t("排除"), unresolved: t("尚未解决") }[event.decision]}</dd></div><div><dt>{t("边界状态")}</dt><dd>{{ bounded: t("已定位有限范围"), open: t("边界开放"), unknown: t("边界未知") }[event.boundary_status]}</dd></div>
+      {event.location.kind === 'point' ? <div className="wide"><dt>{t("事件可能发生范围 · 原视频")}</dt><dd className="mono">{rangeLabel(event.location.anchor_range_us)}</dd></div> : <><div><dt>{t("开始不确定范围")}</dt><dd className="mono">{rangeLabel(event.location.start_range_us)}</dd></div><div><dt>{t("结束不确定范围")}</dt><dd className="mono">{rangeLabel(event.location.end_range_us)}</dd></div></>}
+      {event.clip && <><div className="wide"><dt>{t("请求裁剪范围 · 原视频")}</dt><dd className="mono">{rangeLabel(event.clip.cut_range_us)}</dd></div><div className="wide"><dt>{t("实际裁剪范围 · 原视频")}</dt><dd className="mono">{event.clip.actual_range_us ? rangeLabel(event.clip.actual_range_us) : t("后端未提供")}</dd></div></>}
     </dl>
-    <details className="trace-details"><summary>事件来源与证据</summary><dl><dt>事件 ID</dt><dd className="mono">{event.event_id}</dd><dt>来源候选</dt><dd className="mono">{event.source_candidate_ids.join(', ') || '未提供'}</dd><dt>主体 / 对象标识</dt><dd>{event.entity_key}</dd><dt>证据引用</dt><dd className="mono">{event.evidence_refs.join(', ') || '未提供'}</dd>{event.duplicate_of && <><dt>关联重复事件</dt><dd className="mono">{event.duplicate_of}</dd></>}</dl><Artifacts value={event} /></details>
+    <details className="trace-details"><summary>{t("事件来源与证据")}</summary><dl><dt>{t("事件 ID")}</dt><dd className="mono">{event.event_id}</dd><dt>{t("来源候选")}</dt><dd className="mono">{event.source_candidate_ids.join(', ') || t("未提供")}</dd><dt>{t("主体 / 对象标识")}</dt><dd>{event.entity_key}</dd><dt>{t("证据引用")}</dt><dd className="mono">{event.evidence_refs.join(', ') || t("未提供")}</dd>{event.duplicate_of && <><dt>{t("关联重复事件")}</dt><dd className="mono">{event.duplicate_of}</dd></>}</dl><Artifacts value={event} /></details>
   </div>;
 }
 
 function DebugPanel({ run, logs }: { run: Run; logs: LogEntry[] }) {
-  return <details className="debug-panel"><summary><span><Icon name="code" size={18} />处理记录与调试</span><span className="muted small">{logs.length} 条已载入日志</span></summary>
-    <div className="debug-body"><div className="debug-toolbar"><span className="mono">{run.id}</span><a href={`/api/runs/${encodeURIComponent(run.id)}`} target="_blank" rel="noreferrer">运行 JSON ↗</a>{run.results && <a href={`/api/runs/${encodeURIComponent(run.id)}/results`} target="_blank" rel="noreferrer">结果 JSON ↗</a>}</div>
-      <details><summary>本次查询解释与冻结配置</summary><pre>{JSON.stringify({ query_spec: run.query_spec, config: run.config, progress: run.progress }, null, 2)}</pre></details>
-      <div className="log-list">{logs.length === 0 ? <p className="muted">尚无处理日志。</p> : logs.map(log => <div className={`log-entry log-${log.level}`} key={log.seq}><div className="log-meta"><span className="mono">#{log.seq} · {new Date(log.time).toLocaleTimeString('zh-CN', { hour12: false })}</span><span>{stageNames[log.stage] ?? log.stage}</span><span>{log.level}</span></div><p>{log.message}</p><Artifacts value={{ artifact_refs: log.artifact_refs, details: log.details }} />{Object.keys(log.details ?? {}).length > 0 && <details><summary>查看参数与原始引用</summary><pre>{JSON.stringify(log.details, null, 2)}</pre></details>}</div>)}</div>
-      {(run.tasks ?? []).length > 0 && <details><summary>全部任务与产物引用（{run.tasks!.length}）</summary>{run.tasks!.map(task => <TaskDetails key={task.task_id} task={task} />)}</details>}
+  return <details className="debug-panel"><summary><span><Icon name="code" size={18} />{t("处理记录与调试")}</span><span className="muted small">{appMessage('{count} 条已载入日志', { count: logs.length })}</span></summary>
+    <div className="debug-body"><div className="debug-toolbar"><span className="mono">{run.id}</span><a href={`/api/runs/${encodeURIComponent(run.id)}`} target="_blank" rel="noreferrer">{t("运行 JSON ↗")}</a>{run.results && <a href={`/api/runs/${encodeURIComponent(run.id)}/results`} target="_blank" rel="noreferrer">{t("结果 JSON ↗")}</a>}</div>
+      <details><summary>{t("本次查询解释与冻结配置")}</summary><pre>{JSON.stringify({ query_spec: run.query_spec, config: run.config, progress: run.progress }, null, 2)}</pre></details>
+      <div className="log-list">{logs.length === 0 ? <p className="muted">{t("尚无处理日志。")}</p> : logs.map(log => <div className={`log-entry log-${log.level}`} key={log.seq}><div className="log-meta"><span className="mono">#{log.seq} · {new Date(log.time).toLocaleTimeString(localeTag(), { hour12: false })}</span><span>{stageNames[log.stage] ?? log.stage}</span><span>{log.level}</span></div><p>{log.message}</p><Artifacts value={{ artifact_refs: log.artifact_refs, details: log.details }} />{Object.keys(log.details ?? {}).length > 0 && <details><summary>{t("查看参数与原始引用")}</summary><pre>{JSON.stringify(log.details, null, 2)}</pre></details>}</div>)}</div>
+      {(run.tasks ?? []).length > 0 && <details><summary>{appMessage('全部任务与产物引用（{count}）', { count: run.tasks!.length })}</summary>{run.tasks!.map(task => <TaskDetails key={task.task_id} task={task} />)}</details>}
     </div>
   </details>;
 }
@@ -102,6 +110,7 @@ function TaskDetails({ task }: { task: Task }) {
 }
 
 export default function App() {
+  const { language, setLanguage } = useI18n();
   const [health, setHealth] = useState<Health | null>(null);
   const [media, setMedia] = useState<Media[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -126,8 +135,8 @@ export default function App() {
   const [maxOutputTokens, setMaxOutputTokens] = useState('16384');
   const [temperature, setTemperature] = useState('1');
   const [busy, setBusy] = useState<'upload' | 'demo' | 'create' | 'cancel' | null>(null);
-  const [error, setError] = useState('');
-  const [pollError, setPollError] = useState('');
+  const [error, setError] = useState<UiError>('');
+  const [pollError, setPollError] = useState<UiError>('');
   const [filter, setFilter] = useState<ResultBucket | 'all'>('all');
   const [eventId, setEventId] = useState('');
   const [sourceError, setSourceError] = useState(false);
@@ -135,6 +144,7 @@ export default function App() {
   const logCursor = useRef(0);
   const formRef = useRef<HTMLFormElement>(null);
   const workspaceRef = useRef<HTMLElement>(null);
+  const priorLanguage = useRef(language);
   const selectedMedia = media.find(item => item.id === mediaId);
   const runMedia = media.find(item => item.id === run?.media_id);
   const viewerMedia = run ? runMedia : selectedMedia;
@@ -162,6 +172,25 @@ export default function App() {
   useEffect(() => { setSourceError(false); }, [viewerMedia?.id]);
   useEffect(() => { if (runId) workspaceRef.current?.scrollIntoView?.({ behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" }); }, [runId]);
   useEffect(() => {
+    if (priorLanguage.current === language) return;
+    priorLanguage.current = language;
+    if (!runId) return;
+    const controller = new AbortController();
+    // Refresh server-owned diagnostics, without resetting the selected event, logs, or draft.
+    void api<Run>(`/runs/${encodeURIComponent(runId)}`, { signal: controller.signal }).then(localized => {
+      if (controller.signal.aborted) return;
+      setPollError('');
+      setRun(previous => {
+        if (previous && previous.id !== localized.id) return previous;
+        if (previous && Date.parse(previous.updated_at) > Date.parse(localized.updated_at)) return previous;
+        return localized;
+      });
+    }).catch(cause => {
+      if (!controller.signal.aborted) setPollError({ message: '无法刷新本次运行的系统提示：{error}', cause });
+    });
+    return () => controller.abort();
+  }, [language, runId]);
+  useEffect(() => {
     setRun(null); setLogs([]); setEventId(''); setFilter('all'); setPollError(''); logCursor.current = 0;
     try { if (runId) localStorage.setItem('video-workbench-run', runId); else localStorage.removeItem('video-workbench-run'); } catch { /* local storage may be unavailable */ }
     if (!runId) return;
@@ -170,9 +199,11 @@ export default function App() {
     let terminalPolls = 0;
     async function poll() {
       try {
+        const requestLocale = localeTag();
         const current = await api<Run>(`/runs/${encodeURIComponent(runId)}`, { signal: controller.signal });
         const entries = await api<{ items: LogEntry[] }>(`/runs/${encodeURIComponent(runId)}/logs?after=${logCursor.current}&limit=200`, { signal: controller.signal });
         if (controller.signal.aborted) return;
+        if (requestLocale !== localeTag()) { timeout = setTimeout(poll, 0); return; }
         setRun(current); setPollError('');
         setRuns(prior => [current, ...prior.filter(item => item.id !== current.id)].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at)).slice(0, 30));
         if (entries.items.length > 0) {
@@ -187,7 +218,7 @@ export default function App() {
         if (!terminalStatuses.has(current.status) || pendingCosts || terminalPolls < 2) timeout = setTimeout(poll, 1200);
       } catch (e) {
         if (controller.signal.aborted) return;
-        setPollError(`刷新运行失败：${errorText(e)}。正在重连。`);
+        setPollError({ message: '刷新运行失败：{error}。正在重连。', cause: e });
         timeout = setTimeout(poll, 4000);
       }
     }
@@ -202,7 +233,7 @@ export default function App() {
       const body = new FormData(); body.append('file', file);
       const item = await api<Media>('/media', { method: 'POST', body });
       setMedia(prior => [item, ...prior.filter(m => m.id !== item.id)]); setMediaId(item.id); setRunId('');
-    } catch (e) { setError(`上传失败：${errorText(e)}`); }
+    } catch (e) { setError({ message: '上传失败：{error}', cause: e }); }
     finally { setBusy(null); }
   }
 
@@ -210,8 +241,8 @@ export default function App() {
     setBusy('demo'); setError('');
     try {
       const item = await api<Media>('/demo', { method: 'POST' });
-      setMedia(prior => [item, ...prior.filter(m => m.id !== item.id)]); setMediaId(item.id); setRunId(''); setProvider('fixture'); setProfile('point'); setQuery(defaultQuery);
-    } catch (e) { setError(`测试视频生成失败：${errorText(e)}`); }
+      setMedia(prior => [item, ...prior.filter(m => m.id !== item.id)]); setMediaId(item.id); setRunId(''); setProvider('fixture'); setProfile('point'); setQuery(t(defaultQuery));
+    } catch (e) { setError({ message: '测试视频生成失败：{error}', cause: e }); }
     finally { setBusy(null); }
   }
 
@@ -230,7 +261,7 @@ export default function App() {
       };
       const item = await api<Run>('/runs', jsonRequest({ media_id: selectedMedia.id, query: query.trim(), config }, { 'Idempotency-Key': crypto.randomUUID() }));
       setRunId(item.id); setRuns(prior => [item, ...prior.filter(r => r.id !== item.id)]);
-    } catch (e) { setError(`无法开始处理：${errorText(e)}`); }
+    } catch (e) { setError({ message: '无法开始处理：{error}', cause: e }); }
     finally { setBusy(null); }
   }
 
@@ -238,7 +269,7 @@ export default function App() {
     if (!run) return;
     setBusy('cancel'); setError('');
     try { setRun(await api<Run>(`/runs/${encodeURIComponent(run.id)}/cancel`, { method: 'POST' })); }
-    catch (e) { setError(`取消失败：${errorText(e)}`); }
+    catch (e) { setError({ message: '取消失败：{error}', cause: e }); }
     finally { setBusy(null); }
   }
 
@@ -254,74 +285,74 @@ export default function App() {
   const isFixtureRun = run?.config.provider === 'fixture';
 
   return <div className="app-shell">
-    <a className="skip-link" href="#main-workspace">跳到工作区</a>
-    <header className="topbar"><a className="brand" href="#" onClick={(e) => { e.preventDefault(); setRunId(''); }}><span className="brand-mark"><Icon name="film" size={23} /></span><div><strong>视频事件工作台</strong><span>VIDEO EVENT WORKBENCH</span></div></a><div className="system-health"><span className={`health-dot ${health ? 'online' : ''}`} /><span>{health ? '本地服务已连接' : '等待本地服务'}</span><span className="version">PROTOTYPE / 01</span></div></header>
+    <a className="skip-link" href="#main-workspace">{t("跳到工作区")}</a>
+    <header className="topbar"><a className="brand" href="#" onClick={(e) => { e.preventDefault(); setRunId(''); }}><span className="brand-mark"><Icon name="film" size={23} /></span><div><strong>{t("视频事件工作台")}</strong><span>VIDEO EVENT WORKBENCH</span></div></a><div className="topbar-tools"><div className="system-health"><span className={`health-dot ${health ? 'online' : ''}`} /><span>{health ? t("本地服务已连接") : t("等待本地服务")}</span><span className="version">PROTOTYPE / 01</span></div><label className="language-switch" htmlFor="interface-language"><span>{t('界面语言')}</span><select id="interface-language" value={language} onChange={event => setLanguage(event.target.value as Language)}><option value="en">English</option><option value="zh">中文</option></select></label></div></header>
     <div className="layout">
       <aside className="sidebar">
-        <div className="sidebar-heading"><span className="eyebrow">新建任务</span><h1>从视频里，<br />找出你关心的事件。</h1><p>上传视频，描述要找的动作或时刻。<br />逐段扫描，保留匹配与不确定结果。</p></div>
+        <div className="sidebar-heading"><span className="eyebrow">{t("新建任务")}</span><h1>{t("从视频里，")}<br />{t("找出你关心的事件。")}</h1><p>{t("上传视频，描述要找的动作或时刻。")}<br />{t("逐段扫描，保留匹配与不确定结果。")}</p></div>
         <form ref={formRef} onSubmit={createRun} className="run-form">
-          <section className="form-section"><div className="step-label"><span>01</span><h2>选择视频</h2></div>
+          <section className="form-section"><div className="step-label"><span>01</span><h2>{t("选择视频")}</h2></div>
             <FileUploader busy={busy !== null} uploading={busy === 'upload'} onUpload={upload}
               onError={message => setError(message)} />
-            {media.length > 0 && <div className="field"><label htmlFor="media-select">已导入的视频</label><select id="media-select" value={mediaId} onChange={e => { setMediaId(e.target.value); setRunId(''); }} disabled={busy !== null}><option value="">选择一个视频</option>{media.map(item => <option key={item.id} value={item.id}>{item.is_demo ? '[测试素材] ' : ''}{item.filename}</option>)}</select></div>}
-            {selectedMedia && <div className="media-selected"><Icon name="film" size={16} /><span>{formatTime(selectedMedia.duration_us)}<span className="divider">/</span>{selectedMedia.is_demo ? '内置工程测试素材' : '已导入'}</span></div>}
-            <button type="button" className="text-button demo-button" disabled={busy !== null} onClick={() => void loadDemo()}>{busy === 'demo' ? '正在生成测试视频…' : '没有素材？载入内置工程测试视频'} <Icon name="arrow" size={14} /></button>
+            {media.length > 0 && <div className="field"><label htmlFor="media-select">{t("已导入的视频")}</label><select id="media-select" value={mediaId} onChange={e => { setMediaId(e.target.value); setRunId(''); }} disabled={busy !== null}><option value="">{t("选择一个视频")}</option>{media.map(item => <option key={item.id} value={item.id}>{item.is_demo ? t("[测试素材] ") : ''}{item.filename}</option>)}</select></div>}
+            {selectedMedia && <div className="media-selected"><Icon name="film" size={16} /><span>{formatTime(selectedMedia.duration_us)}<span className="divider">/</span>{selectedMedia.is_demo ? t("内置工程测试素材") : t("已导入")}</span></div>}
+            <button type="button" className="text-button demo-button" disabled={busy !== null} onClick={() => void loadDemo()}>{busy === 'demo' ? t("正在生成测试视频…") : t("没有素材？载入内置工程测试视频")} <Icon name="arrow" size={14} /></button>
           </section>
-          <section className="form-section"><div className="step-label"><span>02</span><h2>描述目标事件</h2></div>
-            <label className="visually-hidden" htmlFor="query">自然语言查询</label><textarea id="query" value={query} onChange={e => setQuery(e.target.value)} required minLength={2} maxLength={4000} rows={5} placeholder="例如：找出机械臂每次抓取物体的完整尝试，保留失败尝试，排除等待。" />
-            <div className="template-row"><span>试试</span>{templates.map(template => <button type="button" key={template.title} onClick={() => { setQuery(template.query); setProfile(template.profile); }}>{template.title}</button>)}</div>
-            <div className="field"><label htmlFor="profile">处理预设</label><select id="profile" value={profile} onChange={e => setProfile(e.target.value as Profile)}><option value="auto">auto · 根据 QuerySpec 选择</option><option value="action">action · 动作区间，默认 2 FPS</option><option value="point">point · 短促时刻，默认 6 FPS</option></select><p className="field-help">预设控制 scan 密度；要找的内容始终以查询为准。</p></div>
+          <section className="form-section"><div className="step-label"><span>02</span><h2>{t("描述目标事件")}</h2></div>
+            <label className="visually-hidden" htmlFor="query">{t("自然语言查询")}</label><textarea id="query" value={query} onChange={e => setQuery(e.target.value)} required minLength={2} maxLength={4000} rows={5} placeholder={t("例如：找出机械臂每次抓取物体的完整尝试，保留失败尝试，排除等待。")} />
+            <div className="template-row"><span>{t("试试")}</span>{templates.map(template => <button type="button" key={template.title} onClick={() => { setQuery(t(template.query)); setProfile(template.profile); }}>{t(template.title)}</button>)}</div>
+            <div className="field"><label htmlFor="profile">{t("处理预设")}</label><select id="profile" value={profile} onChange={e => setProfile(e.target.value as Profile)}><option value="auto">{t("auto · 根据 QuerySpec 选择")}</option><option value="action">{t("action · 动作区间，默认 2 FPS")}</option><option value="point">{t("point · 短促时刻，默认 6 FPS")}</option></select><p className="field-help">{t("预设控制 scan 密度；要找的内容始终以查询为准。")}</p></div>
           </section>
-          <section className="form-section"><div className="step-label"><span>03</span><h2>选择处理方式</h2></div>
-            <label className={`provider-option ${provider === 'gemini' ? 'selected' : ''}`}><input type="radio" name="provider" value="gemini" checked={provider === 'gemini'} onChange={() => setProvider('gemini')} /><span><strong>Gemini 视频识别</strong><small>将视频抽样内容发送到模型 API</small></span><Badge status={health?.api_key_configured ? 'succeeded' : 'pending'}>{health?.api_key_configured ? '已配置密钥' : '未配置密钥'}</Badge></label>
-            <label className={`provider-option ${provider === 'fixture' ? 'selected fixture' : ''} ${!selectedMedia?.is_demo ? 'disabled' : ''}`}><input type="radio" name="provider" value="fixture" checked={provider === 'fixture'} disabled={!selectedMedia?.is_demo} onChange={() => setProvider('fixture')} /><span><strong>Fixture 工程测试</strong><small>仅限内置素材，使用预设结果</small></span></label>
-            {provider === 'fixture' && <p className="fixture-notice"><strong>非真实 AI 识别。</strong> 此模式用于验证处理、截取和显示流程，结果不能代表模型效果。</p>}
-            {provider === 'gemini' && health && !health.api_key_configured && <p className="field-help">请在后端 .env 中配置 GEMINI_API_KEY。界面不接收或显示密钥。</p>}
+          <section className="form-section"><div className="step-label"><span>03</span><h2>{t("选择处理方式")}</h2></div>
+            <label className={`provider-option ${provider === 'gemini' ? 'selected' : ''}`}><input type="radio" name="provider" value="gemini" checked={provider === 'gemini'} onChange={() => setProvider('gemini')} /><span><strong>{t("Gemini 视频识别")}</strong><small>{t("将视频抽样内容发送到模型 API")}</small></span><Badge status={health?.api_key_configured ? 'succeeded' : 'pending'}>{health?.api_key_configured ? t("已配置密钥") : t("未配置密钥")}</Badge></label>
+            <label className={`provider-option ${provider === 'fixture' ? 'selected fixture' : ''} ${!selectedMedia?.is_demo ? 'disabled' : ''}`}><input type="radio" name="provider" value="fixture" checked={provider === 'fixture'} disabled={!selectedMedia?.is_demo} onChange={() => setProvider('fixture')} /><span><strong>{t("Fixture 工程测试")}</strong><small>{t("仅限内置素材，使用预设结果")}</small></span></label>
+            {provider === 'fixture' && <p className="fixture-notice"><strong>{t("非真实 AI 识别。")}</strong> {t("此模式用于验证处理、截取和显示流程，结果不能代表模型效果。")}</p>}
+            {provider === 'gemini' && health && !health.api_key_configured && <p className="field-help">{t("请在后端 .env 中配置 GEMINI_API_KEY。界面不接收或显示密钥。")}</p>}
           </section>
-          <section className="form-section"><div className="step-label"><span>04</span><h2>分别选择输入方式</h2></div>
+          <section className="form-section"><div className="step-label"><span>04</span><h2>{t("分别选择输入方式")}</h2></div>
             <InputModeControls scanMode={scanInputMode} refineMode={refineInputMode} onScanChange={setScanInputMode} onRefineChange={setRefineInputMode} profile={profile} disabled={busy === 'create'} />
           </section>
-          <details className="advanced"><summary>高级参数 <span>可选</span></summary><div className="advanced-fields">
-            <div className="field"><label htmlFor="model">模型 ID</label><input id="model" value={model} onChange={e => setModel(e.target.value)} disabled={provider === 'fixture'} /></div>
-            <div className="field-pair"><div className="field"><label htmlFor="scan-fps">scan FPS · 可覆盖预设</label><input id="scan-fps" type="number" min="0.1" max={scanInputMode === "video" ? 24 : 30} step="0.1" placeholder="按预设" value={scanFps} onChange={e => setScanFps(e.target.value)} /></div><div className="field"><label htmlFor="window-length">窗口负责时长 / 秒</label><input id="window-length" type="number" min="0.1" max="120" step="0.1" placeholder="按预设" value={coreWindow} onChange={e => setCoreWindow(e.target.value)} /></div></div>
-            <div className="field-pair"><div className="field"><label htmlFor="refine-fps">refine FPS</label><input id="refine-fps" type="number" min="0.1" max={refineInputMode === "video" ? 24 : 60} step="0.1" required value={refineFps} onChange={e => setRefineFps(e.target.value)} /></div><div className="field"><label htmlFor="max-calls">最大模型调用次数</label><input id="max-calls" type="number" min="1" max="5000" required value={maxCalls} onChange={e => setMaxCalls(e.target.value)} /></div></div>
-            <div className="field-pair"><div className="field"><label htmlFor="model-concurrency">model 并行数</label><input id="model-concurrency" type="number" min="1" max="8" step="1" required value={modelConcurrency} onChange={e => setModelConcurrency(e.target.value)} /></div><div className="field"><label htmlFor="clip-concurrency">clip 并行数</label><input id="clip-concurrency" type="number" min="1" max="4" step="1" required value={clipConcurrency} onChange={e => setClipConcurrency(e.target.value)} /></div></div>
-            <div className="field"><label htmlFor="request-timeout">模型请求超时 / 秒</label><input id="request-timeout" type="number" min="10" max="3600" required value={requestTimeout} onChange={e => setRequestTimeout(e.target.value)} /></div>
-            <div className="field-pair"><div className="field"><label htmlFor="thinking-level">thinking level</label><select id="thinking-level" value={thinkingLevel} onChange={e => setThinkingLevel(e.target.value)} disabled={provider === 'fixture'}><option value="low">low · 默认</option><option value="medium">medium</option><option value="high">high</option><option value="default">模型默认</option></select></div><div className="field"><label htmlFor="max-output-tokens">输出 token 上限</label><input id="max-output-tokens" type="number" min="512" max="32768" step="1" required value={maxOutputTokens} onChange={e => setMaxOutputTokens(e.target.value)} /></div></div>
+          <details className="advanced"><summary>{t("高级参数 ")}<span>{t("可选")}</span></summary><div className="advanced-fields">
+            <div className="field"><label htmlFor="model">{t("模型 ID")}</label><input id="model" value={model} onChange={e => setModel(e.target.value)} disabled={provider === 'fixture'} /></div>
+            <div className="field-pair"><div className="field"><label htmlFor="scan-fps">{t("scan FPS · 可覆盖预设")}</label><input id="scan-fps" type="number" min="0.1" max={scanInputMode === "video" ? 24 : 30} step="0.1" placeholder={t("按预设")} value={scanFps} onChange={e => setScanFps(e.target.value)} /></div><div className="field"><label htmlFor="window-length">{t("窗口负责时长 / 秒")}</label><input id="window-length" type="number" min="0.1" max="120" step="0.1" placeholder={t("按预设")} value={coreWindow} onChange={e => setCoreWindow(e.target.value)} /></div></div>
+            <div className="field-pair"><div className="field"><label htmlFor="refine-fps">refine FPS</label><input id="refine-fps" type="number" min="0.1" max={refineInputMode === "video" ? 24 : 60} step="0.1" required value={refineFps} onChange={e => setRefineFps(e.target.value)} /></div><div className="field"><label htmlFor="max-calls">{t("最大模型调用次数")}</label><input id="max-calls" type="number" min="1" max="5000" required value={maxCalls} onChange={e => setMaxCalls(e.target.value)} /></div></div>
+            <div className="field-pair"><div className="field"><label htmlFor="model-concurrency">{t("model 并行数")}</label><input id="model-concurrency" type="number" min="1" max="8" step="1" required value={modelConcurrency} onChange={e => setModelConcurrency(e.target.value)} /></div><div className="field"><label htmlFor="clip-concurrency">{t("clip 并行数")}</label><input id="clip-concurrency" type="number" min="1" max="4" step="1" required value={clipConcurrency} onChange={e => setClipConcurrency(e.target.value)} /></div></div>
+            <div className="field"><label htmlFor="request-timeout">{t("模型请求超时 / 秒")}</label><input id="request-timeout" type="number" min="10" max="3600" required value={requestTimeout} onChange={e => setRequestTimeout(e.target.value)} /></div>
+            <div className="field-pair"><div className="field"><label htmlFor="thinking-level">thinking level</label><select id="thinking-level" value={thinkingLevel} onChange={e => setThinkingLevel(e.target.value)} disabled={provider === 'fixture'}><option value="low">{t("low · 默认")}</option><option value="medium">medium</option><option value="high">high</option><option value="default">{t("模型默认")}</option></select></div><div className="field"><label htmlFor="max-output-tokens">{t("输出 token 上限")}</label><input id="max-output-tokens" type="number" min="512" max="32768" step="1" required value={maxOutputTokens} onChange={e => setMaxOutputTokens(e.target.value)} /></div></div>
             <div className="field"><label htmlFor="temperature">temperature</label><input id="temperature" type="number" min="0" max="2" step="0.1" required value={temperature} onChange={e => setTemperature(e.target.value)} /></div>
-            <p className="field-help">输出预算包含 thinking。默认 low 为 JSON 留出预算，temperature 1 沿用 Gemini 3 建议值；其他模型请选模型默认 thinking。</p>
-            <p className="field-help">每次运行冻结配置；修改后新建运行。并行数控制同时处理的数量，较密采样会增加处理成本。</p>
+            <p className="field-help">{t("输出预算包含 thinking。默认 low 为 JSON 留出预算，temperature 1 沿用 Gemini 3 建议值；其他模型请选模型默认 thinking。")}</p>
+            <p className="field-help">{t("每次运行冻结配置；修改后新建运行。并行数控制同时处理的数量，较密采样会增加处理成本。")}</p>
           </div></details>
-          {health && (!health.ffmpeg_available || !health.ffprobe_available) && <p className="error-text">后端缺少 FFmpeg 或 FFprobe，暂时无法处理视频。</p>}
-          {health && !health.worker_alive && <p className="field-help">后台 Worker 尚未在线。新任务会留在队列中，等待 Worker 启动。</p>}
-          {!health && <button type="button" className="text-button" onClick={() => { setError(''); void refreshLists(); }}>重新连接后端</button>}
-          <button className="button button-primary start-button" type="submit" disabled={cannotStart}>{busy === 'create' ? '正在创建任务…' : '开始定位事件'}<Icon name="arrow" /></button>
-          <p className="form-footnote">自动识别结果可供检查与下载，未经人工标注确认。</p>
+          {health && (!health.ffmpeg_available || !health.ffprobe_available) && <p className="error-text">{t("后端缺少 FFmpeg 或 FFprobe，暂时无法处理视频。")}</p>}
+          {health && !health.worker_alive && <p className="field-help">{t("后台 Worker 尚未在线。新任务会留在队列中，等待 Worker 启动。")}</p>}
+          {!health && <button type="button" className="text-button" onClick={() => { setError(''); void refreshLists(); }}>{t("重新连接后端")}</button>}
+          <button className="button button-primary start-button" type="submit" disabled={cannotStart}>{busy === 'create' ? t("正在创建任务…") : t("开始定位事件")}<Icon name="arrow" /></button>
+          <p className="form-footnote">{t("自动识别结果可供检查与下载，未经人工标注确认。")}</p>
         </form>
-        {runs.length > 0 && <section className="history"><div className="section-line"><h2>最近运行</h2><span className="muted small">{runs.length}</span></div>{runs.slice(0, 8).map(item => <button type="button" key={item.id} className={`history-item ${runId === item.id ? 'selected' : ''}`} onClick={() => setRunId(item.id)}><span className="history-query">{item.query}</span><span className="history-input-mode mono">{item.config.scan_input_mode && item.config.refine_input_mode ? `${item.config.scan_input_mode} → ${item.config.refine_input_mode}` : '输入方式未记录'}</span><span className="history-meta"><time>{new Date(item.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })}</time><Badge status={item.status} /></span></button>)}</section>}
+        {runs.length > 0 && <section className="history"><div className="section-line"><h2>{t("最近运行")}</h2><span className="muted small">{runs.length}</span></div>{runs.slice(0, 8).map(item => <button type="button" key={item.id} className={`history-item ${runId === item.id ? 'selected' : ''}`} onClick={() => setRunId(item.id)}><span className="history-query">{item.query}</span><span className="history-input-mode mono">{item.config.scan_input_mode && item.config.refine_input_mode ? `${item.config.scan_input_mode} → ${item.config.refine_input_mode}` : t("输入方式未记录")}</span><span className="history-meta"><time>{new Date(item.created_at).toLocaleString(localeTag(), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })}</time><Badge status={item.status} /></span></button>)}</section>}
       </aside>
       <main ref={workspaceRef} id="main-workspace" className={`workspace workspace-${workspaceTone(run)}`} tabIndex={-1}>
-        {(error || pollError) && <div className="error-banner" role="alert"><Icon name="alert" /><div>{error || pollError}</div>{error && <button type="button" className="text-button" onClick={() => setError('')} aria-label="关闭错误提示">关闭</button>}</div>}
+        {(error || pollError) && <div className="error-banner" role="alert"><Icon name="alert" /><div>{displayUiError(error || pollError)}</div>{error && <button type="button" className="text-button" onClick={() => setError('')} aria-label={t("关闭错误提示")}>{t("关闭")}</button>}</div>}
         <RunStatusPanel run={run} media={runMedia ?? selectedMedia} health={health} canceling={busy === 'cancel'}
           onCancel={() => void cancelRun()} />
         {run && <FrozenRunConfig run={run} />}
-        {isFixtureRun && <div className="fixture-banner"><Icon name="alert" /><p><strong>工程测试模式 · 非真实 AI 识别</strong><span>当前结果来自内置测试规则，用于检查时间映射、片段截取和界面流程。</span></p></div>}
-        <section className="source-section" aria-labelledby="source-title"><div className="section-line"><h3 id="source-title">原视频</h3>{viewerMedia && <span className="source-filename">{viewerMedia.filename}</span>}</div>
-          {sourceUrl ? <video ref={sourceVideo} key={viewerMedia?.id} className="source-player" src={sourceUrl} controls preload="metadata" aria-label="原视频播放器" onLoadedMetadata={() => setSourceError(false)} onError={() => setSourceError(true)} /> : <div className="source-placeholder"><span className="placeholder-film"><Icon name="film" size={40} /></span><h3>{viewerMedia ? '正在准备可播放视频' : '视频与定位结果会显示在这里'}</h3><p>{viewerMedia ? '保留当前任务，等待视频处理完成。' : '支持长视频中的重复动作、短促时刻和完整活动区间。'}</p><div className="placeholder-flow"><span>导入视频</span><i>→</i><span>定位事件</span><i>→</i><span>查看片段</span></div></div>}
-          {sourceError && <p className="error-text">浏览器暂时无法播放原片。代理视频准备好后可重新打开本次运行。</p>}
-          {viewerMedia && <div className="source-footer"><span>{formatTime(viewerMedia.duration_us)}<span className="divider">/</span>{viewerMedia.is_demo ? '内置测试视频' : '上传原片'}</span>{viewerMedia.original_url && <a href={viewerMedia.original_url} download>下载原视频 ↗</a>}</div>}
+        {isFixtureRun && <div className="fixture-banner"><Icon name="alert" /><p><strong>{t("工程测试模式 · 非真实 AI 识别")}</strong><span>{t("当前结果来自内置测试规则，用于检查时间映射、片段截取和界面流程。")}</span></p></div>}
+        <section className="source-section" aria-labelledby="source-title"><div className="section-line"><h3 id="source-title">{t("原视频")}</h3>{viewerMedia && <span className="source-filename">{viewerMedia.filename}</span>}</div>
+          {sourceUrl ? <video ref={sourceVideo} key={viewerMedia?.id} className="source-player" src={sourceUrl} controls preload="metadata" aria-label={t("原视频播放器")} onLoadedMetadata={() => setSourceError(false)} onError={() => setSourceError(true)} /> : <div className="source-placeholder"><span className="placeholder-film"><Icon name="film" size={40} /></span><h3>{viewerMedia ? t("正在准备可播放视频") : t("视频与定位结果会显示在这里")}</h3><p>{viewerMedia ? t("保留当前任务，等待视频处理完成。") : t("支持长视频中的重复动作、短促时刻和完整活动区间。")}</p><div className="placeholder-flow"><span>{t("导入视频")}</span><i>→</i><span>{t("定位事件")}</span><i>→</i><span>{t("查看片段")}</span></div></div>}
+          {sourceError && <p className="error-text">{t("浏览器暂时无法播放原片。代理视频准备好后可重新打开本次运行。")}</p>}
+          {viewerMedia && <div className="source-footer"><span>{formatTime(viewerMedia.duration_us)}<span className="divider">/</span>{viewerMedia.is_demo ? t("内置测试视频") : t("上传原片")}</span>{viewerMedia.original_url && <a href={viewerMedia.original_url} download>{t("下载原视频 ↗")}</a>}</div>}
         </section>
         {run && <CoveragePanel run={run} media={runMedia} />}
         <CostPanel run={run} logs={logs} />
-        {run && <section className="results-section" aria-labelledby="results-title"><div className="section-line"><h2 id="results-title">事件结果 <span className="count">{events.length}</span></h2><span className="muted small">{run.results?.provisional ? "中间结果 · 尚未定稿" : "模型结果 · 只读"}</span></div>
-          <div className="filters" aria-label="按识别结果筛选">{(['all', 'matched', 'uncertain', 'rejected'] as const).map(bucket => <button type="button" key={bucket} aria-pressed={filter === bucket} className={filter === bucket ? 'active' : ''} onClick={() => { setFilter(bucket); setEventId(''); }}>{bucket === 'all' ? '全部' : bucketNames[bucket]}<span>{bucket === 'all' ? events.length : events.filter(event => event.result_bucket === bucket).length}</span></button>)}</div>
-          {filteredEvents.length > 0 ? <div className="results-grid"><div className="event-list" aria-label="事件列表">{filteredEvents.map((event, index) => <button type="button" key={event.event_id} onClick={() => setEventId(event.event_id)} className={`event-card ${selectedEvent?.event_id === event.event_id ? 'selected' : ''}`} aria-pressed={selectedEvent?.event_id === event.event_id}><div className="event-card-top"><span className="event-number">{String(index + 1).padStart(2, '0')}</span><Badge status={event.result_bucket}>{bucketNames[event.result_bucket]}</Badge></div><strong className="mono">{locationLabel(event.location)}</strong><p>{event.reason || (event.location.kind === 'point' ? '事件时刻' : '动作区间')}</p><span className="event-card-foot">{event.clip?.kind === 'context_fallback' ? '上下文预览' : event.clip_status === 'succeeded' ? '片段已就绪' : event.clip_status === 'failed' ? '截取失败' : event.result_bucket === 'rejected' ? '保留排除理由' : '等待片段'}<Icon name="arrow" size={14} /></span></button>)}</div>{selectedEvent && <EventDetails event={selectedEvent} seekSource={seekSource} />}</div> : <div className="results-empty"><Icon name={active ? 'film' : run.status === 'completed' ? 'check' : 'alert'} size={28} /><h3>{active ? '正在定位事件' : events.length ? '此分类没有事件' : run.status === 'completed' ? '处理完成，没有返回匹配事件' : '尚未生成可展示的事件'}</h3><p>{active ? '扫描与局部核实的进展会持续显示在覆盖范围和处理记录中。' : events.length ? '切换到其他分类查看结果。' : run.status === 'completed' ? '空结果仅表示本次模型未返回事件；可调整查询或采样配置后重新运行。' : run.status === 'partial' || run.status === 'failed' ? '运行在事件结果生成前停止。上方整体状态显示具体错误及未完成步骤。' : '运行已取消。已经保存的结果会在这里保留。'}</p></div>}
-          {(run.results?.limitations ?? []).length > 0 && <details className="limitations"><summary>本次运行的限制与说明</summary><ul>{run.results!.limitations.map((item, i) => <li key={i}>{item}</li>)}</ul></details>}
-          {duplicateRecords.length > 0 && <details className="limitations"><summary>重复来源记录（{duplicateRecords.length} 条，不计为独立事件）</summary><ul>{duplicateRecords.map(item => <li key={item.event_id}><span className="mono">{item.event_id}</span> → <span className="mono">{item.duplicate_of}</span>{item.reason && <p>{item.reason}</p>}</li>)}</ul></details>}
+        {run && <section className="results-section" aria-labelledby="results-title"><div className="section-line"><h2 id="results-title">{t("事件结果 ")}<span className="count">{events.length}</span></h2><span className="muted small">{run.results?.provisional ? t("中间结果 · 尚未定稿") : t("模型结果 · 只读")}</span></div>
+          <div className="filters" aria-label={t("按识别结果筛选")}>{(['all', 'matched', 'uncertain', 'rejected'] as const).map(bucket => <button type="button" key={bucket} aria-pressed={filter === bucket} className={filter === bucket ? 'active' : ''} onClick={() => { setFilter(bucket); setEventId(''); }}>{bucket === 'all' ? t("全部") : t(bucketNames[bucket])}<span>{bucket === 'all' ? events.length : events.filter(event => event.result_bucket === bucket).length}</span></button>)}</div>
+          {filteredEvents.length > 0 ? <div className="results-grid"><div className="event-list" aria-label={t("事件列表")}>{filteredEvents.map((event, index) => <button type="button" key={event.event_id} onClick={() => setEventId(event.event_id)} className={`event-card ${selectedEvent?.event_id === event.event_id ? 'selected' : ''}`} aria-pressed={selectedEvent?.event_id === event.event_id}><div className="event-card-top"><span className="event-number">{String(index + 1).padStart(2, '0')}</span><Badge status={event.result_bucket}>{t(bucketNames[event.result_bucket])}</Badge></div><strong className="mono">{locationLabel(event.location)}</strong><p>{event.reason || (event.location.kind === 'point' ? t("事件时刻") : t("动作区间"))}</p><span className="event-card-foot">{event.clip?.kind === 'context_fallback' ? t("上下文预览") : event.clip_status === 'succeeded' ? t("片段已就绪") : event.clip_status === 'failed' ? t("截取失败") : event.result_bucket === 'rejected' ? t("保留排除理由") : t("等待片段")}<Icon name="arrow" size={14} /></span></button>)}</div>{selectedEvent && <EventDetails event={selectedEvent} seekSource={seekSource} />}</div> : <div className="results-empty"><Icon name={active ? 'film' : run.status === 'completed' ? 'check' : 'alert'} size={28} /><h3>{active ? t("正在定位事件") : events.length ? t("此分类没有事件") : run.status === 'completed' ? t("处理完成，没有返回匹配事件") : t("尚未生成可展示的事件")}</h3><p>{active ? t("扫描与局部核实的进展会持续显示在覆盖范围和处理记录中。") : events.length ? t("切换到其他分类查看结果。") : run.status === 'completed' ? t("空结果仅表示本次模型未返回事件；可调整查询或采样配置后重新运行。") : run.status === 'partial' || run.status === 'failed' ? t("运行在事件结果生成前停止。上方整体状态显示具体错误及未完成步骤。") : t("运行已取消。已经保存的结果会在这里保留。")}</p></div>}
+          {(run.results?.limitations ?? []).length > 0 && <details className="limitations"><summary>{t("本次运行的限制与说明")}</summary><ul>{run.results!.limitations.map((item, i) => <li key={i}>{item}</li>)}</ul></details>}
+          {duplicateRecords.length > 0 && <details className="limitations"><summary>{appMessage('重复来源记录（{count} 条，不计为独立事件）', { count: duplicateRecords.length })}</summary><ul>{duplicateRecords.map(item => <li key={item.event_id}><span className="mono">{item.event_id}</span> → <span className="mono">{item.duplicate_of}</span>{item.reason && <p>{item.reason}</p>}</li>)}</ul></details>}
         </section>}
         {run && <DebugPanel run={run} logs={logs} />}
-        {!run && <div className="getting-started"><div><span className="eyebrow">输入保持简单</span><h3>说清“什么发生了”，<br />也可以指定开始和结束。</h3></div><p>系统保留每个事件的原视频时间、匹配理由和处理记录。<br />看不清或定位不完整的事件会单独列出。</p></div>}
-        <footer className="workspace-footer"><span>本地原型 · 自动定位与截取</span><span>原视频时间为所有结果的共同依据</span></footer>
+        {!run && <div className="getting-started"><div><span className="eyebrow">{t("输入保持简单")}</span><h3>{t("说清“什么发生了”，")}<br />{t("也可以指定开始和结束。")}</h3></div><p>{t("系统保留每个事件的原视频时间、匹配理由和处理记录。")}<br />{t("看不清或定位不完整的事件会单独列出。")}</p></div>}
+        <footer className="workspace-footer"><span>{t("本地原型 · 自动定位与截取")}</span><span>{t("原视频时间为所有结果的共同依据")}</span></footer>
       </main>
     </div>
   </div>;

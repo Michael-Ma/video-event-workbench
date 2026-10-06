@@ -309,3 +309,21 @@ UI 展示每次调用的 input mode、latency、input/cached/output/thinking tok
 | video 到 video | 47.7 秒 | 9 | 6 matched | 6 | 0.039614 |
 
 两者对最后一次投篮的位置条件判断不同，不能仅由数量确定准确率。总共 6 次真实试跑、57 次模型调用的已知标准价估算为 1.553354 美元，包含排查时的截断响应；这不是账户账单。116 项后端测试、33 项前端测试、前端构建与代码检查通过，覆盖四种输入组合、并行限额、原子预算、未知结果阻断、取消与费用保存、fractional FPS 时长量化及 mapping 兼容。实际页面验证了两个输入选择、真实费用明细、390 像素布局和可播放片段。
+
+
+## English and Chinese interface on 2026-10-06
+
+The header language selector supports English and Chinese, follows the browser language
+on first use, and remembers the choice. It translates system labels, run status, configuration,
+costs, filters, and known errors without rewriting draft queries, event selection, user
+filenames, model judgments, or raw logs. Query templates use the chosen language only when clicked.
+
+Each API request carries Accept-Language. Supported variants and quality weights choose
+read-time diagnostic and error copy; API defaults remain Chinese. Content-Language and
+Vary describe the returned language. Stable error codes and structured parameters let
+existing errors change language while preserving technical details.
+
+Validation passed 142 backend tests, 56 frontend tests, Ruff, and TypeScript/Vite build.
+The actual desktop and 390-pixel UI confirmed language changes, saved preference after
+reload, unchanged queries, selection and costs, and no horizontal page overflow.
+No Gemini calls were made for this localization change.

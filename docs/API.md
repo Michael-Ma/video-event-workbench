@@ -27,7 +27,7 @@ Result envelope: `{run_id, provider, model_id, query_spec, events:EventResult[],
 scan_complete, coverage:{duration_us,covered_us,gaps}, stats, limitations}`.
 Pydantic `EventResult` is authoritative. Its clip URL is exposed by the API.
 
-Errors: `{error:{code,message,retryable?,details?}}`. Missing key is a settings
+Errors: `{error:{code,message,retryable?,details?,technical_message?}}`. Missing key is a settings
 error, not an empty event list. Fixture mode is allowed only on the built-in demo.
 
 Run detail includes `diagnostics`: issues with stage, code, human-readable title/message,
@@ -68,3 +68,14 @@ Results may be available while running. `provisional:true` marks saved intermedi
 events awaiting global reconciliation; their matched bucket is exposed as uncertain.
 After reconciliation, available clips are published incrementally. Cancelled or failed
 runs retain the last published snapshot. A zero-event partial result is not absence proof.
+
+## System language
+
+Send `Accept-Language: en` or `zh` to localize known API errors and run diagnostics.
+Supported language variants and quality weights are recognized; the API defaults to Chinese
+when no supported language is requested. Localized error and run-detail responses include
+`Content-Language` and `Vary: Accept-Language`.
+
+Translation is generated at read time. Stored queries, model judgments, task journals,
+raw logs, timestamps, technical messages/details, and costs retain their original values.
+Unknown external errors remain verbatim. Upload-limit errors include `details.max_upload_mb`.

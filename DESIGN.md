@@ -90,6 +90,29 @@ outputs are fabricated by the application.
   inspected. This checks presentation and interaction, not a live model/backend.
 - Live provider calls and final backend integration remain the root integration
   pass. This frontend work did not call Gemini or change backend contracts.
+
+## English / Chinese interface (2026-10-06)
+
+The header includes an English / 中文 selector with a 44px target. On narrow
+screens the connection indicator moves to its own row, retaining a usable
+language control without changing the workbench layout. Fixed application copy,
+upload states, accessibility labels, front-end error prefixes, and dates follow
+the selected locale. Language preferences persist locally and set the document
+language/title through the shared i18n module.
+
+A locale switch changes presentation only: draft queries, selected media,
+input modes, result filters, selected events, saved configuration, original model
+reasons, and costs remain unchanged. Query templates are generated in the current
+language only when explicitly selected. The current run is fetched again to
+refresh backend-owned system diagnostics; no new run or model call is created.
+Pending poll snapshots from the previous locale cannot overwrite that refresh.
+Raw debug logs and JSON artifacts remain source records rather than translations.
+
+Focused RTL checks cover immediate text changes, retained form values/file input,
+filter/event/cost preservation, read-only run refresh, templates, localized error
+prefixes, upload validation, locale persistence, and document language. Actual
+desktop and 390-pixel browser checks confirmed both languages, preserved state and costs,
+persisted language after reload, and no horizontal page overflow.
 ## Final comparison controls and runtime 2026 10 05
 
 Advanced controls expose thinking low, a 16384-token output budget and temperature 1.

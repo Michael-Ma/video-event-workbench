@@ -7,7 +7,7 @@ event records and downloadable clips. It supports point events such as ball cont
 and interval events such as a shooting motion or a grasp attempt. Every run exposes
 its candidates, model responses, coverage, uncertainty, latency, and estimated cost.
 
-**Status:** prototype · **Interface:** Chinese · **Execution:** local application with cloud Gemini inference
+**Status:** prototype · **Interface:** English and Chinese · **Execution:** local application with cloud Gemini inference
 
 [Quick Start](#quick-start) · [Features](#features) · [Design Architecture](#design-architecture) ·
 [Key Workflow](#key-workflow) · [Key Innovations](#key-innovations) · [Validation](#validation) ·
@@ -56,18 +56,18 @@ Missing tools are installed where supported. Initial setup needs internet access
 `curl` or `wget`; system package installation may require administrator permission.
 
 ```sh
-git clone git@github.com:Michael-Ma/video-event-workbench.git
+git clone https://github.com/Michael-Ma/video-event-workbench.git
 cd video-event-workbench
 ./start.sh
 ```
 
-Open **[http://127.0.0.1:5173](http://127.0.0.1:5173)** after the launcher prints
-`[就绪]`. Readiness requires the API, worker heartbeat, and frontend to be available.
+Open **[http://127.0.0.1:5173](http://127.0.0.1:5173)** after the launcher reports
+that all services are ready. Readiness requires the API, worker heartbeat, and frontend to be available.
 Press **Ctrl+C** to stop all services started by the launcher.
 
 ### Try the engineering demo
 
-Load **内置工程测试视频** and select **Fixture 工程测试**. The generated 12-second
+Select **Load built-in fixture demo** and use **Fixture engineering test**. The generated 12-second
 video uses declared event labels and requires no Gemini key or remote model call.
 It exercises the pipeline, source-time mapping, exports, and UI; it does not measure
 semantic recognition accuracy.
@@ -81,6 +81,9 @@ placeholder with your Gemini API key, then restart:
 GEMINI_API_KEY=YOUR_API_KEY
 GEMINI_MODEL=gemini-3.8-flash
 ```
+
+Use the language selector in the header to choose **English** or **Chinese**. The app
+remembers your selection; existing queries and model output retain their original text.
 
 1. Upload or select a video and enter a query.
 2. Choose a processing preset and the input mode for each model stage.
@@ -106,9 +109,9 @@ the key remotely. A port conflict fails without terminating another application'
 
 | Event kind | Query |
 | --- | --- |
-| Point | 找到小球每次触地的时刻，并截取前后各一秒。 |
-| Interval | 找出每次投篮，从屈膝准备到球完全离手，保留未命中的投篮。 |
-| Interval | 找到机械臂每次抓取物体的完整尝试，从开始靠近到尝试结束，包括失败尝试。 |
+| Point | Find every visible ball-ground contact and include one second before and after. |
+| Interval | Find each shooting motion, from the start of the knee bend to the ball leaving the hands; include missed shots. |
+| Interval | Find every complete grasp attempt, from approaching the object until the attempt ends, including failed attempts. |
 
 ## Design Architecture
 
@@ -277,11 +280,13 @@ Reusing a saved response does not create another paid-call entry.
 
 ## Validation
 
-The latest validated snapshot on **2026-10-05** passed **116 backend tests**, **33 frontend
+The latest validated snapshot on **2026-10-06** passed **142 backend tests**, **56 frontend
 tests**, Ruff, and the TypeScript/Vite build. Coverage includes real local FFmpeg operations,
 all four input combinations, VFR/source-time mapping, bounded concurrency, atomic budgets,
 unknown requests, cancellation, cost receipts, and candidate association rules. Automated
-tests do not make paid Gemini calls.
+tests do not make paid Gemini calls. Localization checks cover language negotiation,
+saved error translation, persisted preferences, and unchanged queries, event records,
+technical evidence, and costs across language changes.
 
 A live smoke comparison used the same 54.8-second basketball video and query, scan 2 FPS,
 refine 6 FPS, concurrency 2, and low thinking:

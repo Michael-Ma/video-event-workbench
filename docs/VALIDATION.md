@@ -137,3 +137,20 @@ Six live trials made 57 recorded generation calls. Their known paid-Standard est
 USD 1.55335425, including truncated replies; this is not a billing receipt. The two methods
 disagree on the final shot's position requirement. No complete human labels were supplied,
 so these results do not establish recall, precision, or general superiority of either method.
+
+## English and Chinese interface verification on 2026-10-06
+
+142 backend tests and Ruff passed; 56 frontend tests and the TypeScript/Vite build passed.
+Tests cover Accept-Language quality negotiation, English/Chinese API errors and historical
+diagnostics, stable error codes and upload-limit parameters, language persistence, and
+unchanged queries, model evidence, tasks, logs, and costs. Multipart uploads retain their
+body and browser-generated content type; JSON requests retain idempotency headers.
+
+The actual local UI was checked at the default desktop viewport and 390 by 844 pixels.
+Language switching preserved a draft query, independently selected input modes, selected
+event, and the USD 0.039614 subtotal for an existing run. Reloading retained English.
+At 390 pixels the document width was 375 pixels and the language control height was 44
+pixels. Both languages rendered without page-level horizontal overflow. Comparing live
+English and Chinese responses for a saved partial run showed equal queries, results, tasks,
+cost summaries, errors, and timestamps with translated diagnostic titles. These checks
+made no Gemini requests.

@@ -1,4 +1,6 @@
 import type { CallCost, CostSummary, LogEntry, Run, Task } from './types';
+import { localeTag, t } from './i18n';
+import './messages-panels';
 
 export type CostState = 'estimated' | 'local' | 'pending' | 'unknown' | 'unrecorded';
 
@@ -127,11 +129,11 @@ export function summarizeCosts(run: Run, rows: CallRow[]): CostSummary & { sourc
 }
 
 export function formatUsd(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value) || value < 0) return '未知';
+  if (value == null || !Number.isFinite(value) || value < 0) return t('未知');
   if (value > 0 && value < 0.000001) return '< $0.000001';
   return `$${value.toFixed(6)}`;
 }
 
 export function formatTokens(value: number | null): string {
-  return value === null ? '—' : value.toLocaleString('en-US');
+  return value === null ? '—' : value.toLocaleString(localeTag());
 }
